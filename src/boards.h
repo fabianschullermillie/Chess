@@ -9,7 +9,10 @@
 #pragma once
 
 #include "standard_board.h"
+#include "variant/toroidal.h"
 
-#define WOMBAT_FOR_EACH_BOARD(X) X(StandardBoard)
+static_assert(Board<ToroidalBoard>);
+
+#define WOMBAT_FOR_EACH_BOARD(X) X(StandardBoard) X(ToroidalBoard)
 
 #endif //CHESS_BOARDS_H

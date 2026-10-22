@@ -52,6 +52,11 @@ set(ENGINE_SOURCES
         src/datagen.cpp
         src/OpeningDB.cpp
         src/EndgameDB.cpp
+        src/variant/variant.cpp
+        src/variant/variants.cpp
+        src/variant/position.cpp
+        src/variant/movegen.cpp
+        src/variant/eval.cpp
         ${SURGE_SOURCES}
 )
 
@@ -68,7 +73,7 @@ if (EMSCRIPTEN)
             -sEXPORTED_FUNCTIONS=_main,_wombat_command
             -sEXPORTED_RUNTIME_METHODS=ccall
             -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=2GB
-            -sSTACK_SIZE=2MB -sDEFAULT_PTHREAD_STACK_SIZE=2MB
+            -sSTACK_SIZE=4MB -sDEFAULT_PTHREAD_STACK_SIZE=4MB
             # search thread + one helper per extra core, created per "go"
             "-sPTHREAD_POOL_SIZE=Math.min(globalThis.navigator?.hardwareConcurrency||4,32)+1"
             -sEXIT_RUNTIME=0)
@@ -79,6 +84,10 @@ endif ()
 
 add_executable(Wombat main.cpp ${ENGINE_SOURCES})
 target_link_libraries(Wombat PRIVATE fathom Threads::Threads)
+
+# Move generator checks: the variant board with orthodox rules against surge, toroidal perft
+add_executable(VariantTests tests/variant_tests.cpp ${ENGINE_SOURCES})
+target_link_libraries(VariantTests PRIVATE fathom Threads::Threads)
 
 add_executable(Openings util/create_openings.cpp ${SURGE_SOURCES})
 # see src/surge_attacks.h

@@ -33,8 +33,8 @@ template<class B>
 concept Board = requires(typename B::Position &p, const typename B::Position &cp, typename B::Move m,
                          typename B::Move *list, const std::string &s, std::ostream &os, Color c) {
     // Identity
-    { B::NAME } -> std::convertible_to<const char *>;      // UCI_Variant name
-    { B::START_FEN } -> std::convertible_to<const char *>;
+    { B::NAME } -> std::convertible_to<std::string>;       // UCI_Variant name
+    { B::START_FEN } -> std::convertible_to<std::string>;
     { B::NUM_SQUARES } -> std::convertible_to<int>;         // move.from()/to() are < NUM_SQUARES
     { B::MAX_MOVES } -> std::convertible_to<int>;           // upper bound for generate_legals
     { B::HAS_NNUE } -> std::convertible_to<bool>;
