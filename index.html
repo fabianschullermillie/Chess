@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#000000">
+    <title>Wombat Toroidal Chess</title>
+    <meta name="description" content="Play toroidal chess (and orthodox chess) against Wombat, a C++ engine compiled to multithreaded WebAssembly. With a 3D torus view.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♞</text></svg>">
+    <!-- SharedArrayBuffer (needed for the engine's threads) requires cross-origin isolation.
+         GitHub Pages can't send the COOP/COEP headers, so a service worker adds them. -->
+    <script src="coi-serviceworker.min.js"></script>
+    <link rel="stylesheet" href="vendor/chessground.base.css">
+    <link rel="stylesheet" href="vendor/chessground.cburnett.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+    <h1>Wombat <span class="variant-title">· toroidal chess</span></h1>
+    <p>A C++ chess engine running in your browser as multithreaded WebAssembly.
+        <span class="toroidal-only">On the torus the a- and h-files are adjacent, and so are the 1st and 8th ranks.</span>
+        <a href="https://github.com/fabianschullermillie/Chess">Source</a></p>
+</header>
+
+<main>
+    <section class="board-area">
+        <div class="player top" id="player-top"></div>
+        <div class="board-row">
+            <div class="evalbar" id="evalbar" title="Evaluation (White's view)">
+                <div class="evalbar-fill" id="evalbar-fill"></div>
+                <span id="evalbar-label">0.0</span>
+            </div>
+            <div class="board-wrap" id="board-wrap">
+                <div id="board" class="cg-wrap"></div>
+                <div id="promotion" class="promotion" hidden></div>
+            </div>
+        </div>
+        <div class="player bottom" id="player-bottom"></div>
+    </section>
+
+    <aside class="panel">
+        <div class="buttons">
+            <button id="new-white">New game as White</button>
+            <button id="new-black">New game as Black</button>
+            <button id="undo">Take back</button>
+            <button id="flip">Flip board</button>
+            <button id="view3d" class="wide" hidden>Show torus (3D)</button>
+        </div>
+
+        <div class="settings">
+            <label>Variant
+                <select id="variant">
+                    <option value="toroidal" selected>Toroidal</option>
+                    <option value="chess">Standard</option>
+                </select>
+            </label>
+            <label>Mode
+                <select id="mode">
+                    <option value="play">Play vs. engine</option>
+                    <option value="analyze">Analysis (both sides)</option>
+                </select>
+            </label>
+            <label>Think time
+                <select id="movetime">
+                    <option value="250">0.25 s</option>
+                    <option value="1000">1 s</option>
+                    <option value="2000" selected>2 s</option>
+                    <option value="5000">5 s</option>
+                    <option value="10000">10 s</option>
+                </select>
+            </label>
+            <label>Threads
+                <select id="threads"></select>
+            </label>
+            <label id="nnue-label">Evaluation
+                <select id="nnue">
+                    <option value="true" selected>NNUE</option>
+                    <option value="false">Classical</option>
+                </select>
+            </label>
+            <label>Hash
+                <select id="hash">
+                    <option value="16">16 MB</option>
+                    <option value="64" selected>64 MB</option>
+                    <option value="256">256 MB</option>
+                </select>
+            </label>
+        </div>
+
+        <!-- Engine statistics (depth, score, speed, nodes, principal variation), parsed from the
+             engine's UCI "info" output. Disabled for now; app.js skips the elements while they are absent.
+        <div class="engine">
+            <div class="engine-head">
+                <span>Engine</span>
+                <span id="threads-info" class="muted"></span>
+            </div>
+            <dl class="stats">
+                <div><dt>Depth</dt><dd id="st-depth">–</dd></div>
+                <div><dt>Score</dt><dd id="st-score">–</dd></div>
+                <div><dt>Speed</dt><dd id="st-nps">–</dd></div>
+                <div><dt>Nodes</dt><dd id="st-nodes">–</dd></div>
+            </dl>
+            <div class="pv" id="pv"></div>
+        </div>
+        -->
+
+        <div class="moves-box">
+            <div class="engine-head"><span>Moves</span>
+                <button class="link" id="copy-pgn" title="Copy PGN">Copy PGN</button></div>
+            <ol class="moves" id="moves"></ol>
+        </div>
+
+        <form class="fen" id="fen-form">
+            <input id="fen" spellcheck="false" aria-label="FEN">
+            <button type="submit">Load FEN</button>
+        </form>
+    </aside>
+</main>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
