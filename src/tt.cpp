@@ -4,6 +4,7 @@
 
 #include "tt.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "score.h"
@@ -21,8 +22,8 @@ void TranspositionTable::clear() {
 }
 
 // data layout: move(16) | score(16) | eval(16) | depth(8) | bound(2) | generation(6)
-static inline uint64_t pack(Move move, int score, int eval, int depth, Bound bound, uint8_t gen) {
-    return uint64_t(uint16_t(move.to_from()))
+static inline uint64_t pack(uint16_t move, int score, int eval, int depth, Bound bound, uint8_t gen) {
+    return uint64_t(move)
            | uint64_t(uint16_t(int16_t(score))) << 16
            | uint64_t(uint16_t(int16_t(eval))) << 32
            | uint64_t(uint8_t(depth)) << 48
@@ -38,7 +39,7 @@ bool TranspositionTable::probe(uint64_t key, TTData &out) const {
     for (const Entry &e: b.entries) {
         uint64_t data = e.data;
         if ((e.check ^ data) != key || data == 0) continue;
-        out.move = Move(uint16_t(data & 0xFFFF));
+        out.move = uint16_t(data & 0xFFFF);
         out.score = int16_t((data >> 16) & 0xFFFF);
         out.eval = int16_t((data >> 32) & 0xFFFF);
         out.depth = depth_of(data);
@@ -48,7 +49,7 @@ bool TranspositionTable::probe(uint64_t key, TTData &out) const {
     return false;
 }
 
-void TranspositionTable::store(uint64_t key, Move move, int score, int eval, int depth, Bound bound) {
+void TranspositionTable::store(uint64_t key, uint16_t move, int score, int eval, int depth, Bound bound) {
     Bucket &b = buckets[index(key)];
     Entry *replace = &b.entries[0];
     int worst = 1 << 30;
@@ -58,7 +59,7 @@ void TranspositionTable::store(uint64_t key, Move move, int score, int eval, int
         if ((e.check ^ data) == key) {
             // Same position: keep the old best move if we have none, and don't overwrite
             // deeper exact information with a shallow bound
-            if (move.to_from() == 0) move = Move(uint16_t(data & 0xFFFF));
+            if (move == 0) move = uint16_t(data & 0xFFFF);
             if (bound != BOUND_EXACT && depth + 3 < depth_of(data) && gen_of(data) == generation) return;
             replace = &e;
             worst = -1;

@@ -9,15 +9,15 @@
 #include "../src/nnue.h"
 #include "../src/uci.h"
 
-static Engine *engine = nullptr;
+static Uci *uci = nullptr;
 
 int main() {
     board::init();
     nnue::load_default();
-    engine = new Engine();
+    uci = new Uci();
     return 0; // the runtime stays alive (EXIT_RUNTIME=0)
 }
 
 extern "C" EMSCRIPTEN_KEEPALIVE void wombat_command(const char *line) {
-    if (engine) engine->command(line);
+    if (uci) uci->command(line);
 }

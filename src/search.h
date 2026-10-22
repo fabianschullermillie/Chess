@@ -14,11 +14,10 @@
 #include <thread>
 #include <vector>
 
+#include "board_api.h"
 #include "score.h"
 #include "timeman.h"
 #include "tt.h"
-#include "surge_attacks.h"
-#include "../lib/surge/src/position.h"
 
 // Everything a search needs to know about the game so far
 struct GameState {
@@ -27,15 +26,19 @@ struct GameState {
     int halfmove = 0;                 // fifty-move counter at the root
 };
 
+template<class B>
 struct SearchResult {
-    Move best;
-    Move ponder;
+    typename B::Move best{};
+    typename B::Move ponder{};
     int score = 0;
     int depth = 0;
 };
 
-class Worker;
+template<class B> class Worker;
 
+// The search is generic over the board implementation (see board_api.h). It is instantiated in
+// search.cpp for every board the engine supports.
+template<class B>
 class Search {
 public:
     Search();
@@ -52,7 +55,7 @@ public:
     bool searching() const { return running; }
 
     // Blocking convenience wrapper (used by the interactive CLI and bench)
-    SearchResult think(const GameState &game, const SearchLimits &limits, bool print_info);
+    SearchResult<B> think(const GameState &game, const SearchLimits &limits, bool print_info);
 
     uint64_t total_nodes() const;
 
@@ -63,13 +66,13 @@ public:
     bool use_nnue = true; // falls back to the hand-crafted eval if no network is loaded
 
 private:
-    friend class Worker;
+    friend class Worker<B>;
     void run(GameState game, SearchLimits limits);
 
-    std::vector<std::unique_ptr<Worker>> workers;
+    std::vector<std::unique_ptr<Worker<B>>> workers;
     std::thread main_thread;
     std::atomic<bool> running{false};
-    SearchResult result;
+    SearchResult<B> result;
 };
 
 #endif //CHESS_SEARCH_H

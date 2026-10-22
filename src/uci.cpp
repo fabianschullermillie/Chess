@@ -7,16 +7,12 @@
 #include <iostream>
 #include <sstream>
 
-#include "board.h"
+#include "boards.h"
 #include "EndgameDB.h"
-#include "eval.h"
-#include "nnue.h"
 
 using namespace std;
 
 namespace {
-
-const string START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 const vector<string> BENCH_FENS = {
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
@@ -33,34 +29,39 @@ const vector<string> BENCH_FENS = {
     "r1bq1rk1/ppp2ppp/2np1n2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 7",
 };
 
-template<Color Us>
-uint64_t perft_impl(Position &p, int depth) {
-    MoveList<Us> moves(p);
-    if (depth == 1) return moves.size();
+template<class B, Color Us>
+uint64_t perft_impl(typename B::Position &p, int depth) {
+    typename B::Move moves[B::MAX_MOVES];
+    typename B::Move *end = B::template generate_legals<Us>(p, moves);
+    if (depth == 1) return uint64_t(end - moves);
     uint64_t n = 0;
-    for (Move m: moves) {
-        p.play<Us>(m);
-        n += perft_impl<~Us>(p, depth - 1);
-        p.undo<Us>(m);
+    for (auto *m = moves; m != end; ++m) {
+        B::template play<Us>(p, *m);
+        n += perft_impl<B, ~Us>(p, depth - 1);
+        B::template undo<Us>(p, *m);
     }
     return n;
 }
 
 } // namespace
 
-uint64_t perft(Position &p, int depth) {
+template<class B>
+uint64_t perft(typename B::Position &p, int depth) {
     if (depth <= 0) return 1;
-    return p.turn() == WHITE ? perft_impl<WHITE>(p, depth) : perft_impl<BLACK>(p, depth);
+    return B::turn(p) == WHITE ? perft_impl<B, WHITE>(p, depth) : perft_impl<B, BLACK>(p, depth);
 }
 
-Engine::Engine() : pos(make_unique<Position>()) {
-    set_position(START_FEN, {});
+template<class B>
+Engine<B>::Engine() : pos(make_unique<Position>()) {
+    set_position(B::START_FEN, {});
 }
 
-void Engine::set_position(const string &fen, const vector<string> &moves) {
+template<class B>
+void Engine<B>::set_position(const string &fen, const vector<string> &moves) {
     pos = make_unique<Position>();
-    state.halfmove = board::set_fen(*pos, fen);
+    state.halfmove = B::set_fen(*pos, fen);
     state.key_history.clear();
+    plies_since_setup = 0;
 
     // Full move number from the FEN, if present
     istringstream ss(fen);
@@ -70,56 +71,73 @@ void Engine::set_position(const string &fen, const vector<string> &moves) {
         if (i == 5) fullmove = max(1, atoi(field.c_str()));
 
     for (const string &uci: moves) {
-        Move m = board::parse_uci(*pos, uci);
-        if (board::is_null(m)) {
+        Move m = B::parse_uci(*pos, uci);
+        if (B::is_null(m)) {
             cerr << "info string illegal move " << uci << endl;
             break;
         }
         play(m);
     }
-    state.fen = board::fen(*pos, state.halfmove, fullmove);
+    state.fen = B::fen(*pos, state.halfmove, fullmove);
 }
 
-void Engine::play(Move m) {
-    state.key_history.push_back(board::key(*pos));
-    bool resets = board::is_capture(m) || type_of(pos->at(m.from())) == PAWN;
-    state.halfmove = resets ? 0 : state.halfmove + 1;
-    if (pos->turn() == BLACK) ++fullmove;
+template<class B>
+void Engine<B>::play(Move m) {
+    state.key_history.push_back(B::key(*pos));
+    state.halfmove = B::resets_halfmove(*pos, m) ? 0 : state.halfmove + 1;
+    if (B::turn(*pos) == BLACK) ++fullmove;
 
-    if (pos->turn() == WHITE) pos->play<WHITE>(m);
-    else pos->play<BLACK>(m);
+    if (B::turn(*pos) == WHITE) B::template play<WHITE>(*pos, m);
+    else B::template play<BLACK>(*pos, m);
 
     // surge keeps a fixed 256-entry undo history; rebuild the board before it can overflow
-    if (pos->ply() > 200) {
-        string fen = board::fen(*pos, state.halfmove, fullmove);
+    if (++plies_since_setup > 200) {
+        string fen = B::fen(*pos, state.halfmove, fullmove);
         pos = make_unique<Position>();
-        board::set_fen(*pos, fen);
+        B::set_fen(*pos, fen);
+        plies_since_setup = 0;
     }
-    state.fen = board::fen(*pos, state.halfmove, fullmove);
+    state.fen = B::fen(*pos, state.halfmove, fullmove);
 }
 
-bool Engine::book_or_tablebase_move(Move &m) {
-    if (own_book) {
-        if (!book.loaded()) {
-            if (book.load_from_csv(book_file)) cout << "info string loaded " << book.size() << " book positions" << endl;
-            else {
-                cout << "info string could not open book " << book_file << endl;
-                own_book = false;
+template<class B>
+bool Engine<B>::is_draw() const {
+    if (state.halfmove >= 100 || B::insufficient_material(*pos)) return true;
+    const uint64_t k = B::key(*pos);
+    int n = 0, limit = min<int>(state.halfmove, int(state.key_history.size()));
+    for (int i = 1; i <= limit; ++i)
+        if (state.key_history[state.key_history.size() - i] == k) ++n;
+    return n >= 2;
+}
+
+template<class B>
+bool Engine<B>::book_or_tablebase_move(Move &m) {
+    if constexpr (B::HAS_BOOK) {
+        if (own_book) {
+            if (!book.loaded()) {
+                if (book.load_from_csv(book_file)) cout << "info string loaded " << book.size() << " book positions" << endl;
+                else {
+                    cout << "info string could not open book " << book_file << endl;
+                    own_book = false;
+                }
             }
+            if (book.loaded() && book.probe(*pos, m)) return true;
         }
-        if (book.loaded() && book.probe(*pos, m)) return true;
+        EndgameDB::WDL wdl;
+        return endgame_db.probe_root(*pos, state.halfmove, m, wdl);
     }
-    EndgameDB::WDL wdl;
-    return endgame_db.probe_root(*pos, state.halfmove, m, wdl);
+    return false;
 }
 
-Move Engine::best_move(const SearchLimits &limits, bool print_info) {
+template<class B>
+typename B::Move Engine<B>::best_move(const SearchLimits &limits, bool print_info) {
     Move m;
     if (book_or_tablebase_move(m)) return m;
     return search.think(state, limits, print_info).best;
 }
 
-void Engine::go(istringstream &is) {
+template<class B>
+void Engine<B>::go(istringstream &is) {
     SearchLimits limits;
     string token;
     bool perft_mode = false;
@@ -140,7 +158,7 @@ void Engine::go(istringstream &is) {
 
     if (perft_mode) {
         auto start = chrono::steady_clock::now();
-        uint64_t n = perft(*pos, perft_depth);
+        uint64_t n = perft<B>(*pos, perft_depth);
         auto ms = chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - start).count();
         cout << "nodes " << n << " time " << ms << endl;
         return;
@@ -150,13 +168,16 @@ void Engine::go(istringstream &is) {
 
     Move m;
     if (!limits.infinite && book_or_tablebase_move(m)) {
-        cout << "bestmove " << board::move_to_uci(m) << endl;
+        cout << "bestmove " << B::move_to_uci(m) << endl;
         return;
     }
     search.start(state, limits, true);
 }
 
-void Engine::setoption(istringstream &is) {
+// Options that don't apply to this board (e.g. the book for variants) are ignored silently: the
+// front end sends every option to every engine.
+template<class B>
+void Engine<B>::setoption(istringstream &is) {
     string token, name, value;
     is >> token; // "name"
     while (is >> token && token != "value") name += (name.empty() ? "" : " ") + token;
@@ -167,24 +188,19 @@ void Engine::setoption(istringstream &is) {
     if (name == "hash") search.set_hash(clamp(stoi(value), 1, 65536));
     else if (name == "threads") search.set_threads(clamp(stoi(value), 1, 256));
     else if (name == "move overhead") search.time.move_overhead = clamp(stoi(value), 0, 5000);
-    else if (name == "ownbook") own_book = value == "true";
     else if (name == "usennue") search.use_nnue = value == "true";
-    else if (name == "evalfile") {
-        if (nnue::load(value)) cout << "info string loaded network " << value << endl;
-        else cout << "info string could not load network " << value << endl;
+    else if constexpr (B::HAS_BOOK) {
+        if (name == "ownbook") own_book = value == "true";
+        else if (name == "bookfile") book_file = value;
     }
-    else if (name == "bookfile") book_file = value;
-    else if (name == "syzygypath") {
-        syzygy_path = value;
-        if (endgame_db.load(value)) cout << "info string found " << endgame_db.max_pieces() << "-piece tablebases" << endl;
-    } else cout << "info string unknown option " << name << endl;
 }
 
-void Engine::uci_position(istringstream &is) {
+template<class B>
+void Engine<B>::uci_position(istringstream &is) {
     string token, fen;
     is >> token;
     if (token == "startpos") {
-        fen = START_FEN;
+        fen = B::START_FEN;
         is >> token; // "moves"
     } else if (token == "fen") {
         while (is >> token && token != "moves") fen += token + " ";
@@ -196,10 +212,14 @@ void Engine::uci_position(istringstream &is) {
     set_position(fen, moves);
 }
 
-void Engine::bench(int depth) {
+template<class B>
+void Engine<B>::bench(int depth) {
+    vector<string> fens = {B::START_FEN};
+    if constexpr (is_same_v<B, StandardBoard>) fens = BENCH_FENS;
+
     uint64_t nodes = 0;
     auto start = chrono::steady_clock::now();
-    for (const string &fen: BENCH_FENS) {
+    for (const string &fen: fens) {
         set_position(fen, {});
         search.clear();
         SearchLimits limits;
@@ -209,27 +229,16 @@ void Engine::bench(int depth) {
     }
     auto ms = max<int64_t>(1, chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::now() - start).count());
     cout << nodes << " nodes " << nodes * 1000 / ms << " nps" << endl;
-    set_position(START_FEN, {});
+    set_position(B::START_FEN, {});
 }
 
-bool Engine::command(const string &line) {
+template<class B>
+void Engine<B>::command(const string &line) {
     istringstream is(line);
     string token;
-    if (!(is >> token)) return true;
+    if (!(is >> token)) return;
 
-    if (token == "uci") {
-        cout << "id name Wombat\n"
-             << "id author Fabian Schuller\n"
-             << "option name Hash type spin default 64 min 1 max 65536\n"
-             << "option name Threads type spin default 1 min 1 max 256\n"
-             << "option name Move Overhead type spin default 30 min 0 max 5000\n"
-             << "option name UseNNUE type check default true\n"
-             << "option name EvalFile type string default <embedded>\n"
-             << "option name OwnBook type check default false\n"
-             << "option name BookFile type string default " << book_file << "\n"
-             << "option name SyzygyPath type string default <empty>\n"
-             << "uciok" << endl;
-    } else if (token == "isready") {
+    if (token == "isready") {
         cout << "readyok" << endl;
     } else if (token == "setoption") {
         search.wait();
@@ -249,15 +258,13 @@ bool Engine::command(const string &line) {
         search.wait();
     } else if (token == "ponderhit") {
         // pondering is not supported; nothing to do
-    } else if (token == "quit") {
-        search.stop();
-        search.wait();
-        return false;
     } else if (token == "d") {
-        cout << *pos << "FEN: " << state.fen << "\nKey: " << hex << board::key(*pos) << dec << endl;
+        B::print(cout, *pos);
+        cout << "FEN: " << state.fen << "\nKey: " << hex << B::key(*pos) << dec << endl;
     } else if (token == "eval") {
-        cout << "classical " << evaluate(*pos) << " (side to move)" << endl;
-        if (nnue::loaded()) cout << "nnue " << nnue::evaluate(*pos) << " (side to move)" << endl;
+        cout << "classical " << B::evaluate(*pos) << " (side to move)" << endl;
+        if constexpr (B::HAS_NNUE)
+            if (B::nnue_loaded()) cout << "nnue " << nnue::evaluate(*pos) << " (side to move)" << endl;
     } else if (token == "bench") {
         int depth = 13;
         is >> depth;
@@ -265,14 +272,115 @@ bool Engine::command(const string &line) {
     } else {
         cout << "info string unknown command " << token << endl;
     }
+}
+
+#define INSTANTIATE_ENGINE(B) \
+    template class Engine<B>; \
+    template uint64_t perft<B>(B::Position &, int);
+WOMBAT_FOR_EACH_BOARD(INSTANTIATE_ENGINE)
+
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+template<class B>
+void add_engine_factory(map<string, unique_ptr<EngineBase> (*)()> &factories) {
+    factories[B::NAME] = [] { return unique_ptr<EngineBase>(new Engine<B>()); };
+}
+
+const map<string, unique_ptr<EngineBase> (*)()> &engine_factories() {
+    static const auto factories = [] {
+        map<string, unique_ptr<EngineBase> (*)()> f;
+#define ADD_FACTORY(B) add_engine_factory<B>(f);
+        WOMBAT_FOR_EACH_BOARD(ADD_FACTORY)
+        return f;
+    }();
+    return factories;
+}
+
+} // namespace
+
+Uci::Uci() = default;
+
+EngineBase &Uci::engine() {
+    auto &e = engines[variant];
+    if (!e) {
+        e = engine_factories().at(variant)();
+        for (const string &opt: options) e->command(opt);
+    }
+    return *e;
+}
+
+bool Uci::command(const string &line) {
+    istringstream is(line);
+    string token;
+    if (!(is >> token)) return true;
+
+    if (token == "uci") {
+        cout << "id name Wombat\n"
+             << "id author Fabian Schuller\n"
+             << "option name Hash type spin default 64 min 1 max 65536\n"
+             << "option name Threads type spin default 1 min 1 max 256\n"
+             << "option name Move Overhead type spin default 30 min 0 max 5000\n"
+             << "option name UseNNUE type check default true\n"
+             << "option name EvalFile type string default <embedded>\n"
+             << "option name OwnBook type check default false\n"
+             << "option name BookFile type string default data/my_openings_l.csv\n"
+             << "option name SyzygyPath type string default <empty>\n"
+             << "option name UCI_Variant type combo default chess";
+        for (auto &[name, factory]: engine_factories()) cout << " var " << name;
+        cout << "\nuciok" << endl;
+        return true;
+    }
+    if (token == "quit") {
+        for (auto &[name, e]: engines) e->stop();
+        return false;
+    }
+    if (token == "setoption") {
+        string name_token, name, value;
+        is >> name_token;
+        while (is >> token && token != "value") name += (name.empty() ? "" : " ") + token;
+        while (is >> token) value += (value.empty() ? "" : " ") + token;
+        string lower = name;
+        for (auto &c: lower) c = char(tolower(c));
+
+        if (lower == "uci_variant") {
+            if (!engine_factories().count(value)) {
+                cout << "info string unknown variant " << value << endl;
+                return true;
+            }
+            if (value != variant) engine().stop();
+            variant = value;
+            engine();
+            return true;
+        }
+        // Global options (shared by all variants)
+        if (lower == "evalfile") {
+            if (nnue::load(value)) cout << "info string loaded network " << value << endl;
+            else cout << "info string could not load network " << value << endl;
+            return true;
+        }
+        if (lower == "syzygypath") {
+            if (endgame_db.load(value)) cout << "info string found " << endgame_db.max_pieces() << "-piece tablebases" << endl;
+            return true;
+        }
+        static const vector<string> known = {"hash", "threads", "move overhead", "usennue", "ownbook", "bookfile"};
+        if (find(known.begin(), known.end(), lower) == known.end()) {
+            cout << "info string unknown option " << name << endl;
+            return true;
+        }
+        options.push_back(line);
+        for (auto &[n, e]: engines) e->command(line);
+        return true;
+    }
+    engine().command(line);
     return true;
 }
 
-void Engine::loop() {
+void Uci::loop() {
     string line;
     while (getline(cin, line)) {
         if (!command(line)) break;
     }
-    search.stop();
-    search.wait();
+    for (auto &[name, e]: engines) e->stop();
 }

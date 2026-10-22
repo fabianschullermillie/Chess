@@ -1,7 +1,7 @@
 #include <iostream>
 #include <string>
 
-#include "src/board.h"
+#include "src/boards.h"
 #include "src/datagen.h"
 #include "src/nnue.h"
 #include "src/uci.h"
@@ -9,24 +9,33 @@
 using namespace std;
 
 // Human (White) vs engine (Black) in the terminal
-static void play_cli(Engine &engine, int64_t movetime_ms) {
+template<class B>
+static void play_cli(int64_t movetime_ms) {
+    Engine<B> engine;
     while (true) {
-        Position &p = engine.position();
-        cout << p << "\n";
+        auto &p = engine.position();
+        B::print(cout, p);
+        cout << "\n";
 
-        Move moves[218];
-        Move *end = p.turn() == WHITE ? p.generate_legals<WHITE>(moves) : p.generate_legals<BLACK>(moves);
+        typename B::Move moves[B::MAX_MOVES];
+        auto *end = B::turn(p) == WHITE ? B::template generate_legals<WHITE>(p, moves)
+                                        : B::template generate_legals<BLACK>(p, moves);
         if (end == moves) {
-            cout << (board::in_check(p) ? "Checkmate!" : "Stalemate!") << "\n";
+            bool check = B::turn(p) == WHITE ? B::template in_check<WHITE>(p) : B::template in_check<BLACK>(p);
+            cout << (check ? "Checkmate!" : "Stalemate!") << "\n";
+            break;
+        }
+        if (engine.is_draw()) {
+            cout << "Draw!\n";
             break;
         }
 
-        if (p.turn() == WHITE) {
+        if (B::turn(p) == WHITE) {
             cout << "Enter your move (e.g. e2e4, quit to exit): ";
             string input;
             if (!(cin >> input) || input == "quit") break;
-            Move m = board::parse_uci(p, input);
-            if (board::is_null(m)) {
+            auto m = B::parse_uci(p, input);
+            if (B::is_null(m)) {
                 cout << "Invalid move, try again.\n";
                 continue;
             }
@@ -35,8 +44,8 @@ static void play_cli(Engine &engine, int64_t movetime_ms) {
             cout << "Wombat is thinking...\n";
             SearchLimits limits;
             limits.movetime = movetime_ms;
-            Move m = engine.best_move(limits, false);
-            cout << "Wombat plays: " << board::move_to_uci(m) << "\n";
+            auto m = engine.best_move(limits, false);
+            cout << "Wombat plays: " << B::move_to_uci(m) << "\n";
             engine.play(m);
         }
     }
@@ -46,11 +55,10 @@ static void play_cli(Engine &engine, int64_t movetime_ms) {
 int main(int argc, char **argv) {
     board::init();
     if (!nnue::load_default()) cerr << "info string no embedded network, using the classical evaluation" << endl;
-    Engine engine;
 
     string mode = argc > 1 ? argv[1] : "";
     if (mode == "bench") {
-        engine.bench(argc > 2 ? stoi(argv[2]) : 13);
+        Engine<StandardBoard>().bench(argc > 2 ? stoi(argv[2]) : 13);
     } else if (mode == "datagen") {
         // Wombat datagen <out-file> <games> <nodes-per-move> <seed>
         if (argc < 6) {
@@ -59,9 +67,9 @@ int main(int argc, char **argv) {
         }
         run_datagen(argv[2], stoi(argv[3]), stoi(argv[4]), stoull(argv[5]));
     } else if (mode == "play") {
-        play_cli(engine, argc > 2 ? stoll(argv[2]) : 3000);
+        play_cli<StandardBoard>(argc > 2 ? stoll(argv[2]) : 3000);
     } else {
-        engine.loop();
+        Uci().loop();
     }
     return 0;
 }

@@ -13,9 +13,6 @@
 #include <cstdint>
 #include <vector>
 
-#include "surge_attacks.h"
-#include "../lib/surge/src/position.h"
-
 enum Bound : uint8_t {
     BOUND_NONE = 0,
     BOUND_UPPER = 1, // fail-low: score is an upper bound
@@ -24,7 +21,7 @@ enum Bound : uint8_t {
 };
 
 struct TTData {
-    Move move;
+    uint16_t move; // board-specific compact move (Board::move_code), 0 = none
     int score;
     int eval;
     int depth;
@@ -40,7 +37,7 @@ public:
     void new_search() { generation = (generation + 1) & 0x3F; }
 
     bool probe(uint64_t key, TTData &out) const;
-    void store(uint64_t key, Move move, int score, int eval, int depth, Bound bound);
+    void store(uint64_t key, uint16_t move, int score, int eval, int depth, Bound bound);
 
     void prefetch(uint64_t key) const { __builtin_prefetch(&buckets[index(key)]); }
 

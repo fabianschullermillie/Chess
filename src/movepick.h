@@ -11,12 +11,11 @@
 #include <cstdlib>
 #include <utility>
 
-#include "board.h"
-#include "eval.h"
-#include "see.h"
+#include "board_api.h"
 
 // Butterfly history of quiet moves, indexed [color][from][to]
-using HistoryTable = int16_t[2][64][64];
+template<class B>
+using HistoryTable = int16_t[2][B::NUM_SQUARES][B::NUM_SQUARES];
 
 constexpr int HISTORY_MAX = 16384;
 
@@ -25,7 +24,11 @@ inline void update_history(int16_t &entry, int bonus) {
     entry += bonus - entry * std::abs(bonus) / HISTORY_MAX;
 }
 
+template<class B>
 class MovePicker {
+    using Position = typename B::Position;
+    using Move = typename B::Move;
+
 public:
     enum Stage : int {
         SCORE_TT = 30'000'000,
@@ -39,15 +42,13 @@ public:
 
     // Main search: every legal move. Quiescence (captures_only): captures and queen promotions.
     MovePicker(Position &p, Move tt_move, const Move *killers, Move counter,
-               const HistoryTable &history, bool captures_only) {
-        Move *end = p.turn() == WHITE ? p.generate_legals<WHITE>(moves) : p.generate_legals<BLACK>(moves);
+               const HistoryTable<B> &history, bool captures_only) {
+        Move *end = B::turn(p) == WHITE ? B::template generate_legals<WHITE>(p, moves)
+                                        : B::template generate_legals<BLACK>(p, moves);
         total = int(end - moves);
         for (int i = 0; i < total; ++i) {
             Move m = moves[i];
-            if (captures_only && !board::is_capture(m) &&
-                !(board::is_promotion(m) && board::promotion_type(m) == QUEEN)) {
-                continue;
-            }
+            if (captures_only && !B::is_capture(m) && !B::is_queen_promotion(m)) continue;
             moves[count] = m;
             scores[count++] = score(p, m, tt_move, killers, counter, history);
         }
@@ -70,29 +71,29 @@ public:
 
 private:
     int score(const Position &p, Move m, Move tt_move, const Move *killers, Move counter,
-              const HistoryTable &history) const {
+              const HistoryTable<B> &history) const {
         if (m == tt_move) return SCORE_TT;
 
-        if (board::is_capture(m)) {
-            int victim = PIECE_VALUE[board::captured_type(p, m)];
-            int attacker = PIECE_VALUE[type_of(p.at(m.from()))];
+        if (B::is_capture(m)) {
+            int victim = B::captured_value(p, m);
+            int attacker = B::moving_value(p, m);
             int mvv_lva = victim * 16 - attacker / 16;
-            if (board::is_promotion(m)) mvv_lva += PIECE_VALUE[board::promotion_type(m)] * 16;
-            return (see_ge(p, m, 0) ? SCORE_GOOD_CAPTURE : SCORE_BAD_CAPTURE) + mvv_lva;
+            if (B::is_promotion(m)) mvv_lva += B::promotion_value(m) * 16;
+            return (B::see_ge(p, m, 0) ? SCORE_GOOD_CAPTURE : SCORE_BAD_CAPTURE) + mvv_lva;
         }
-        if (board::is_promotion(m)) {
-            return board::promotion_type(m) == QUEEN ? SCORE_PROMOTION : SCORE_BAD_CAPTURE - 1;
+        if (B::is_promotion(m)) {
+            return B::is_queen_promotion(m) ? SCORE_PROMOTION : SCORE_BAD_CAPTURE - 1;
         }
         if (killers) {
             if (m == killers[0]) return SCORE_KILLER1;
             if (m == killers[1]) return SCORE_KILLER2;
         }
         if (m == counter) return SCORE_COUNTER;
-        return history[color_of(p.at(m.from()))][m.from()][m.to()];
+        return history[B::turn(p)][B::from(m)][B::to(m)];
     }
 
-    Move moves[218];
-    int scores[218];
+    Move moves[B::MAX_MOVES];
+    int scores[B::MAX_MOVES];
     int count = 0;
     int total = 0;
     int cur = 0;

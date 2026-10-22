@@ -9,7 +9,7 @@
 #include <random>
 #include <vector>
 
-#include "board.h"
+#include "boards.h"
 #include "uci.h"
 
 using namespace std;
@@ -27,18 +27,6 @@ vector<Move> legal_moves(Position &p) {
     return {moves, end};
 }
 
-bool repetition(const GameState &g) {
-    // Threefold: current key already appeared twice among positions since the last irreversible move
-    if (g.key_history.empty()) return false;
-    Position p;
-    board::set_fen(p, g.fen);
-    uint64_t k = board::key(p);
-    int n = 0, limit = min<int>(g.halfmove, g.key_history.size());
-    for (int i = 1; i <= limit; ++i)
-        if (g.key_history[g.key_history.size() - i] == k) ++n;
-    return n >= 2;
-}
-
 } // namespace
 
 void run_datagen(const string &out, int games, int nodes, uint64_t seed) {
@@ -48,7 +36,7 @@ void run_datagen(const string &out, int games, int nodes, uint64_t seed) {
         return;
     }
     mt19937_64 rng(seed);
-    Engine engine;
+    Engine<StandardBoard> engine;
     uint64_t positions = 0;
 
     for (int game = 0; game < games; ++game) {
@@ -76,14 +64,14 @@ void run_datagen(const string &out, int games, int nodes, uint64_t seed) {
                 break;
             }
             const GameState &g = engine.game();
-            if (g.halfmove >= 100 || board::insufficient_material(p) || repetition(g)) {
+            if (engine.is_draw()) {
                 result = 0.5;
                 break;
             }
 
             SearchLimits limits;
             limits.nodes = nodes;
-            SearchResult r = engine.think(limits);
+            SearchResult<StandardBoard> r = engine.think(limits);
             int white_score = p.turn() == WHITE ? r.score : -r.score;
 
             // Adjudicate clearly decided games

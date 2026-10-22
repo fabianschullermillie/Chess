@@ -12,11 +12,8 @@
 #include <iostream>
 #include <sstream>
 
-#include "board.h"
-#include "eval.h"
+#include "boards.h"
 #include "movepick.h"
-#include "nnue.h"
-#include "see.h"
 
 using namespace std;
 
@@ -38,16 +35,16 @@ string score_to_uci(int score) {
     return "cp " + to_string(score);
 }
 
-inline bool resets_halfmove(const Position &p, Move m) {
-    return board::is_capture(m) || type_of(p.at(m.from())) == PAWN;
-}
-
 } // namespace
 
 // One search thread. Each worker has its own board and heuristics; only the TT is shared.
+template<class B>
 class Worker {
+    using Position = typename B::Position;
+    using Move = typename B::Move;
+
 public:
-    Worker(Search &search, int id) : search(search), id(id) { clear(); }
+    Worker(Search<B> &search, int id) : search(search), id(id) { clear(); }
 
     void clear() {
         memset(history, 0, sizeof(history));
@@ -56,10 +53,12 @@ public:
 
     void setup(const GameState &game) {
         pos = make_unique<Position>();
-        board::set_fen(*pos, game.fen);
+        B::set_fen(*pos, game.fen);
         halfmove[0] = game.halfmove;
-        use_nnue = search.use_nnue && nnue::loaded();
-        if (use_nnue) nnue::refresh(acc[0], *pos);
+        if constexpr (B::HAS_NNUE) {
+            use_nnue = search.use_nnue && B::nnue_loaded();
+            if (use_nnue) B::nnue_refresh(acc[0], *pos);
+        }
 
         // Only the last 100 plies can ever repeat (fifty-move rule)
         size_t keep = min<size_t>(game.key_history.size(), 100);
@@ -75,7 +74,7 @@ public:
         memset(pv_length, 0, sizeof(pv_length));
     }
 
-    SearchResult iterate(const SearchLimits &limits);
+    SearchResult<B> iterate(const SearchLimits &limits);
 
     std::atomic<uint64_t> nodes{0};
 
@@ -89,12 +88,14 @@ private:
     template<Color Us> int qsearch(int alpha, int beta, int ply);
 
     int root_search(int alpha, int beta, int depth) {
-        return pos->turn() == WHITE ? negamax<WHITE>(alpha, beta, depth, 0, false)
+        return B::turn(*pos) == WHITE ? negamax<WHITE>(alpha, beta, depth, 0, false)
                                     : negamax<BLACK>(alpha, beta, depth, 0, false);
     }
 
     int static_evaluate(int ply) const {
-        int e = use_nnue ? nnue::evaluate(acc[ply], pos->turn()) : evaluate(*pos);
+        int e;
+        if constexpr (B::HAS_NNUE) e = use_nnue ? B::nnue_evaluate(acc[ply], B::turn(*pos)) : B::evaluate(*pos);
+        else e = B::evaluate(*pos);
         // Fade the evaluation towards a draw as the fifty-move counter grows
         return e * (200 - halfmove[ply]) / 200;
     }
@@ -109,7 +110,7 @@ private:
     }
 
     bool is_draw(int ply) const {
-        return halfmove[ply] >= 100 || board::insufficient_material(*pos) || is_repetition(ply);
+        return halfmove[ply] >= 100 || B::insufficient_material(*pos) || is_repetition(ply);
     }
 
     bool should_stop() {
@@ -129,27 +130,27 @@ private:
 
     void update_quiet_stats(Color us, int ply, Move best, const Move *tried, int tried_count, int depth) {
         int bonus = min(16 * depth * depth + 32 * depth, 1600);
-        update_history(history[us][best.from()][best.to()], bonus);
+        update_history(history[us][B::from(best)][B::to(best)], bonus);
         for (int i = 0; i < tried_count; ++i)
-            if (tried[i] != best) update_history(history[us][tried[i].from()][tried[i].to()], -bonus);
+            if (tried[i] != best) update_history(history[us][B::from(tried[i])][B::to(tried[i])], -bonus);
 
         if (killers[ply][0] != best) {
             killers[ply][1] = killers[ply][0];
             killers[ply][0] = best;
         }
-        if (ply > 0 && !board::is_null(stack[ply - 1].move)) {
+        if (ply > 0 && !B::is_null(stack[ply - 1].move)) {
             Move prev = stack[ply - 1].move;
-            counter_moves[prev.from()][prev.to()] = best;
+            counter_moves[B::from(prev)][B::to(prev)] = best;
         }
     }
 
     string pv_string() const {
         string s;
-        for (int i = 0; i < pv_length[0]; ++i) s += board::move_to_uci(pv[0][i]) + " ";
+        for (int i = 0; i < pv_length[0]; ++i) s += B::move_to_uci(pv[0][i]) + " ";
         return s;
     }
 
-    Search &search;
+    Search<B> &search;
     const int id;
 
     unique_ptr<Position> pos;
@@ -163,29 +164,30 @@ private:
 
     StackEntry stack[MAX_PLY + 8]{};
     Move killers[MAX_PLY + 8][2]{};
-    HistoryTable history{};
-    Move counter_moves[64][64]{};
+    HistoryTable<B> history{};
+    Move counter_moves[B::NUM_SQUARES][B::NUM_SQUARES]{};
 
     Move pv[MAX_PLY + 8][MAX_PLY + 8]{};
     bool use_nnue = false;
-    nnue::Accumulator acc[MAX_PLY + 8]{};
+    typename AccumulatorOf<B>::type acc[MAX_PLY + 8]{};
     int pv_length[MAX_PLY + 8]{};
 };
 
+template<class B>
 template<Color Us>
-int Worker::qsearch(int alpha, int beta, int ply) {
+int Worker<B>::qsearch(int alpha, int beta, int ply) {
     ++nodes;
     pv_length[ply] = ply;
     if (should_stop()) return 0;
     seldepth = max(seldepth, ply);
 
-    const uint64_t key = board::key(*pos);
+    const uint64_t key = B::key(*pos);
     keys[root_index + ply] = key;
 
-    if (halfmove[ply] >= 100 || board::insufficient_material(*pos)) return 0;
+    if (halfmove[ply] >= 100 || B::insufficient_material(*pos)) return 0;
     if (ply >= MAX_PLY - 1) return static_evaluate(ply);
 
-    const bool in_check = pos->in_check<Us>();
+    const bool in_check = B::template in_check<Us>(*pos);
     const bool pv_node = beta - alpha > 1;
 
     TTData tte{};
@@ -209,7 +211,7 @@ int Worker::qsearch(int alpha, int beta, int ply) {
         alpha = max(alpha, best);
     }
 
-    MovePicker mp(*pos, tt_hit ? tte.move : Move(), nullptr, Move(), history, !in_check);
+    MovePicker<B> mp(*pos, tt_hit ? B::move_from_code(tte.move) : Move(), nullptr, Move(), history, !in_check);
     if (mp.legal_count() == 0) return in_check ? -MATE + ply : 0;
 
     Move best_move;
@@ -222,17 +224,17 @@ int Worker::qsearch(int alpha, int beta, int ply) {
             // Losing captures cannot raise alpha here
             if (move_score < 0) continue;
             // Delta pruning: even winning this piece won't reach alpha
-            if (!board::is_promotion(m) &&
-                static_eval + PIECE_VALUE[board::captured_type(*pos, m)] + 200 <= alpha)
+            if (!B::is_promotion(m) &&
+                static_eval + B::captured_value(*pos, m) + 200 <= alpha)
                 continue;
         }
 
-        if (use_nnue) nnue::update(acc[ply], acc[ply + 1], *pos, m);
-        pos->play<Us>(m);
+        if constexpr (B::HAS_NNUE) if (use_nnue) B::nnue_update(acc[ply], acc[ply + 1], *pos, m);
+        B::template play<Us>(*pos, m);
         halfmove[ply + 1] = 0;
         stack[ply].move = m;
         int score = -qsearch<~Us>(-beta, -alpha, ply + 1);
-        pos->undo<Us>(m);
+        B::template undo<Us>(*pos, m);
 
         if (search.stop_flag.load(memory_order_relaxed)) return 0;
 
@@ -247,15 +249,16 @@ int Worker::qsearch(int alpha, int beta, int ply) {
     }
 
     Bound bound = best >= beta ? BOUND_LOWER : (best > orig_alpha ? BOUND_EXACT : BOUND_UPPER);
-    search.tt.store(key, best_move, score_to_tt(best, ply), static_eval, 0, bound);
+    search.tt.store(key, B::move_code(best_move), score_to_tt(best, ply), static_eval, 0, bound);
     return best;
 }
 
+template<class B>
 template<Color Us>
-int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
+int Worker<B>::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
     const bool root = ply == 0;
     const bool pv_node = beta - alpha > 1;
-    const bool in_check = pos->in_check<Us>();
+    const bool in_check = B::template in_check<Us>(*pos);
     pv_length[ply] = ply;
 
     if (in_check && !root) depth++; // check extension
@@ -265,7 +268,7 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
     if (should_stop()) return 0;
     seldepth = max(seldepth, ply);
 
-    const uint64_t key = board::key(*pos);
+    const uint64_t key = B::key(*pos);
     keys[root_index + ply] = key;
 
     if (!root) {
@@ -282,7 +285,7 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
     TTData tte{};
     const bool tt_hit = search.tt.probe(key, tte);
     const int tt_score = tt_hit ? score_from_tt(tte.score, ply) : NO_SCORE;
-    Move tt_move = tt_hit ? tte.move : Move();
+    Move tt_move = tt_hit ? B::move_from_code(tte.move) : Move();
     if (!pv_node && tt_hit && tte.depth >= depth &&
         (tte.bound == BOUND_EXACT ||
          (tte.bound == BOUND_LOWER && tt_score >= beta) ||
@@ -316,14 +319,14 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
         }
 
         // Null move pruning
-        if (allow_null && depth >= 3 && eval >= beta && board::has_non_pawn_material(*pos, Us)) {
+        if (allow_null && depth >= 3 && eval >= beta && B::has_non_pawn_material(*pos, Us)) {
             int r = 3 + depth / 4 + min((eval - beta) / 200, 3);
-            if (use_nnue) acc[ply + 1] = acc[ply];
-            board::make_null(*pos);
+            if constexpr (B::HAS_NNUE) if (use_nnue) acc[ply + 1] = acc[ply];
+            B::make_null(*pos);
             stack[ply].move = Move();
             halfmove[ply + 1] = 0; // no repetitions across a null move
             int score = -negamax<~Us>(-beta, -beta + 1, depth - r, ply + 1, false);
-            board::unmake_null(*pos);
+            B::unmake_null(*pos);
 
             if (search.stop_flag.load(memory_order_relaxed)) return 0;
             if (score >= beta) return score >= MATE_IN_MAX ? beta : score;
@@ -331,20 +334,20 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
     }
 
     // Internal iterative reduction: without a TT move this node is probably not worth a full search
-    if (depth >= 4 && board::is_null(tt_move)) depth--;
+    if (depth >= 4 && B::is_null(tt_move)) depth--;
 
-    Move counter;
-    if (ply > 0 && !board::is_null(stack[ply - 1].move)) {
+    Move counter{};
+    if (ply > 0 && !B::is_null(stack[ply - 1].move)) {
         Move prev = stack[ply - 1].move;
-        counter = counter_moves[prev.from()][prev.to()];
+        counter = counter_moves[B::from(prev)][B::to(prev)];
     }
 
-    MovePicker mp(*pos, tt_move, killers[ply], counter, history, false);
+    MovePicker<B> mp(*pos, tt_move, killers[ply], counter, history, false);
     if (mp.legal_count() == 0) return in_check ? -MATE + ply : 0;
 
     const int orig_alpha = alpha;
     int best = -INF;
-    Move best_move;
+    Move best_move{};
     Move quiets_tried[64];
     int quiet_count = 0;
     int move_count = 0;
@@ -353,11 +356,11 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
     Move m;
     int move_score;
     while (mp.next(m, move_score)) {
-        const bool quiet = !board::is_tactical(m);
+        const bool quiet = !B::is_capture(m) && !B::is_promotion(m);
         if (quiet && skip_quiets) continue;
 
         // Pruning of moves unlikely to matter (never while we could still be getting mated)
-        if (!root && best > -MATE_IN_MAX && board::has_non_pawn_material(*pos, Us)) {
+        if (!root && best > -MATE_IN_MAX && B::has_non_pawn_material(*pos, Us)) {
             if (quiet) {
                 // Late move pruning
                 if (depth <= 8 && move_count >= (3 + depth * depth) / (2 - improving)) {
@@ -369,19 +372,19 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
                     skip_quiets = true;
                     continue;
                 }
-                if (depth <= 8 && !see_ge(*pos, m, -60 * depth)) continue;
-            } else if (depth <= 6 && !see_ge(*pos, m, -100 * depth)) {
+                if (depth <= 8 && !B::see_ge(*pos, m, -60 * depth)) continue;
+            } else if (depth <= 6 && !B::see_ge(*pos, m, -100 * depth)) {
                 continue;
             }
         }
 
-        const bool resets = resets_halfmove(*pos, m);
-        if (use_nnue) nnue::update(acc[ply], acc[ply + 1], *pos, m);
-        pos->play<Us>(m);
+        const bool resets = B::resets_halfmove(*pos, m);
+        if constexpr (B::HAS_NNUE) if (use_nnue) B::nnue_update(acc[ply], acc[ply + 1], *pos, m);
+        B::template play<Us>(*pos, m);
         ++move_count;
         stack[ply].move = m;
         halfmove[ply + 1] = resets ? 0 : halfmove[ply] + 1;
-        const bool gives_check = pos->in_check<~Us>();
+        const bool gives_check = B::template in_check<~Us>(*pos);
 
         int new_depth = depth - 1;
         int score = -INF;
@@ -392,7 +395,7 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
             r -= pv_node;
             r += !improving;
             r -= gives_check;
-            if (move_score >= MovePicker::SCORE_COUNTER) r -= 1; // killer or counter move
+            if (move_score >= MovePicker<B>::SCORE_COUNTER) r -= 1; // killer or counter move
             else r -= move_score / 8192;                         // history
             r = clamp(r, 0, new_depth - 1);
 
@@ -406,7 +409,7 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
         if (pv_node && (move_count == 1 || (score > alpha && score < beta)))
             score = -negamax<~Us>(-beta, -alpha, new_depth, ply + 1, true);
 
-        pos->undo<Us>(m);
+        B::template undo<Us>(*pos, m);
 
         if (search.stop_flag.load(memory_order_relaxed)) return 0;
 
@@ -429,16 +432,17 @@ int Worker::negamax(int alpha, int beta, int depth, int ply, bool allow_null) {
     if (move_count == 0) return alpha;
 
     Bound bound = best >= beta ? BOUND_LOWER : (best > orig_alpha ? BOUND_EXACT : BOUND_UPPER);
-    search.tt.store(key, best_move, score_to_tt(best, ply), static_eval, depth, bound);
+    search.tt.store(key, B::move_code(best_move), score_to_tt(best, ply), static_eval, depth, bound);
     return best;
 }
 
-SearchResult Worker::iterate(const SearchLimits &limits) {
+template<class B>
+SearchResult<B> Worker<B>::iterate(const SearchLimits &limits) {
     const bool main = id == 0;
     limit_nodes = main ? limits.nodes : 0;
     can_stop = false;
 
-    SearchResult result;
+    SearchResult<B> result;
     int prev_score = 0;
     int stability = 0;
 
@@ -473,7 +477,7 @@ SearchResult Worker::iterate(const SearchLimits &limits) {
         if (search.stop_flag && depth > 1) break;
 
         Move best = pv[0][0];
-        if (board::is_null(best)) break;
+        if (B::is_null(best)) break;
         stability = (best == result.best) ? stability + 1 : 0;
 
         result.best = best;
@@ -507,55 +511,64 @@ SearchResult Worker::iterate(const SearchLimits &limits) {
 
 // ---------------------------------------------------------------------------------------------
 
-Search::Search() { set_threads(1); }
+template<class B>
+Search<B>::Search() { set_threads(1); }
 
-Search::~Search() {
+template<class B>
+Search<B>::~Search() {
     stop();
     wait();
 }
 
-void Search::set_threads(int n) {
+template<class B>
+void Search<B>::set_threads(int n) {
     wait();
     workers.clear();
-    for (int i = 0; i < max(1, n); ++i) workers.push_back(make_unique<Worker>(*this, i));
+    for (int i = 0; i < max(1, n); ++i) workers.push_back(make_unique<Worker<B>>(*this, i));
 }
 
-void Search::clear() {
+template<class B>
+void Search<B>::clear() {
     wait();
     tt.clear();
     for (auto &w: workers) w->clear();
 }
 
-uint64_t Search::total_nodes() const {
+template<class B>
+uint64_t Search<B>::total_nodes() const {
     uint64_t n = 0;
     for (auto &w: workers) n += w->nodes.load(memory_order_relaxed);
     return n;
 }
 
-void Search::start(const GameState &game, const SearchLimits &limits, bool print) {
+template<class B>
+void Search<B>::start(const GameState &game, const SearchLimits &limits, bool print) {
     wait();
     print_info = print;
     stop_flag = false;
     running = true;
-    main_thread = thread(&Search::run, this, game, limits);
+    main_thread = thread(&Search<B>::run, this, game, limits);
 }
 
-void Search::wait() {
+template<class B>
+void Search<B>::wait() {
     if (main_thread.joinable()) main_thread.join();
 }
 
-SearchResult Search::think(const GameState &game, const SearchLimits &limits, bool print) {
+template<class B>
+SearchResult<B> Search<B>::think(const GameState &game, const SearchLimits &limits, bool print) {
     start(game, limits, print);
     wait();
     return result;
 }
 
-void Search::run(GameState game, SearchLimits limits) {
+template<class B>
+void Search<B>::run(GameState game, SearchLimits limits) {
     for (auto &w: workers) w->setup(game);
 
-    Position root;
-    board::set_fen(root, game.fen);
-    time.start(limits, root.turn());
+    auto root = make_unique<typename B::Position>();
+    B::set_fen(*root, game.fen);
+    time.start(limits, B::turn(*root));
     tt.new_search();
 
     // Helper threads search the same position, sharing results only through the TT
@@ -576,18 +589,20 @@ void Search::run(GameState game, SearchLimits limits) {
     for (auto &t: helpers) t.join();
 
     // Fallback if not even depth 1 finished
-    if (board::is_null(result.best)) {
-        Position p;
-        board::set_fen(p, game.fen);
-        Move moves[218];
-        Move *end = p.turn() == WHITE ? p.generate_legals<WHITE>(moves) : p.generate_legals<BLACK>(moves);
+    if (B::is_null(result.best)) {
+        typename B::Move moves[B::MAX_MOVES];
+        typename B::Move *end = B::turn(*root) == WHITE ? B::template generate_legals<WHITE>(*root, moves)
+                                                        : B::template generate_legals<BLACK>(*root, moves);
         if (end != moves) result.best = moves[0];
     }
 
     if (print_info) {
-        cout << "bestmove " << board::move_to_uci(result.best);
-        if (!board::is_null(result.ponder)) cout << " ponder " << board::move_to_uci(result.ponder);
+        cout << "bestmove " << B::move_to_uci(result.best);
+        if (!B::is_null(result.ponder)) cout << " ponder " << B::move_to_uci(result.ponder);
         cout << endl;
     }
     running = false;
 }
+
+#define INSTANTIATE_SEARCH(B) template class Search<B>;
+WOMBAT_FOR_EACH_BOARD(INSTANTIATE_SEARCH)
