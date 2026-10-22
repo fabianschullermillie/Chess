@@ -1,10 +1,20 @@
 import { Chessground } from './vendor/chessground.js';
 import { Chess } from './vendor/chess.js';
+import { VariantGame, TOROIDAL } from './variants.js';
+import { TorusView } from './torus3d.js';
 
 const $ = id => document.getElementById(id);
 // For optional elements (the engine statistics panel is currently disabled in index.html)
 const setText = (id, text) => { const el = $(id); if (el) el.textContent = text; };
-const START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+const STANDARD_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+
+// ---------------------------------------------------------------------------------------------
+// Variants: orthodox chess uses chess.js, toroidal chess our own rules (variants.js) with the same API
+
+function variant() { return $('variant').value; }
+function isToroidal() { return variant() === 'toroidal'; }
+function startFenOf(v = variant()) { return v === 'toroidal' ? TOROIDAL.startFen : STANDARD_FEN; }
+function makeGame(fen = startFenOf()) { return isToroidal() ? new VariantGame(fen, TOROIDAL) : new Chess(fen); }
 const MAX_THREADS = Math.min(navigator.hardwareConcurrency || 4, 32); // matches PTHREAD_POOL_SIZE
 
 // ---------------------------------------------------------------------------------------------
@@ -34,6 +44,7 @@ function startEngine() {
 }
 
 function applyOptions() {
+    uci('setoption name UCI_Variant value ' + variant());
     uci('setoption name Threads value ' + $('threads').value);
     uci('setoption name Hash value ' + $('hash').value);
     uci('setoption name UseNNUE value ' + $('nnue').value);
@@ -41,6 +52,7 @@ function applyOptions() {
 }
 
 function evalName() {
+    if (isToroidal()) return 'Classical';
     return $('nnue').value === 'true' ? 'NNUE' : 'Classical';
 }
 
@@ -124,7 +136,7 @@ function formatCount(n) {
 }
 
 function pvToSan(moves) {
-    const g = new Chess(game.fen());
+    const g = makeGame(game.fen());
     const out = [];
     for (const m of moves) {
         const moveNo = g.moveNumber();
@@ -147,13 +159,13 @@ function setEvalBar(whiteCp, label) {
 // Game state
 
 let game = new Chess();
-let startFen = START_FEN;
+let startFen = STANDARD_FEN;
 let history = []; // chess.js move objects
 let humanColor = 'white';
 let orientation = 'white';
 
 const board = Chessground($('board'), {
-    fen: START_FEN,
+    fen: STANDARD_FEN,
     animation: { duration: 180 },
     movable: { free: false, showDests: true, events: { after: onUserMove } },
     premovable: { enabled: false },
@@ -194,6 +206,8 @@ function update() {
     });
     $('evalbar').classList.toggle('flipped', orientation === 'black');
     $('fen').value = game.fen();
+    if (selected3d && !(humanToMove() && dests().has(selected3d))) selected3d = null;
+    updateTorus();
     renderMoves();
     renderPlayers();
 
@@ -252,10 +266,11 @@ function askPromotion(color, done) {
 function renderMoves() {
     const ol = $('moves');
     ol.replaceChildren();
-    const firstBlack = new Chess(startFen).turn() === 'b';
+    const start = makeGame(startFen);
+    const firstBlack = start.turn() === 'b';
     const plies = history.map(m => m.san);
     if (firstBlack) plies.unshift('…');
-    ol.start = new Chess(startFen).moveNumber();
+    ol.start = start.moveNumber();
     for (let i = 0; i < plies.length; i += 2) {
         const li = document.createElement('li');
         for (const san of plies.slice(i, i + 2)) {
@@ -283,14 +298,15 @@ function setStatus(text, error = false) {
     (error ? console.error : console.log)('[wombat] ' + text);
 }
 
-function newGame(color, fen = START_FEN) {
+function newGame(color, fen = startFenOf()) {
     stopSearch();
-    game = new Chess(fen);
+    game = makeGame(fen);
     startFen = fen;
     history = [];
     humanColor = color;
     orientation = color;
     $('promotion').hidden = true;
+    selected3d = null;
     clearInfo();
     setEvalBar(0, '0.0');
     if (engineReady) uci('ucinewgame');
@@ -324,6 +340,7 @@ $('flip').onclick = () => {
     renderPlayers();
 };
 $('mode').onchange = () => { stopSearch(); update(); };
+$('variant').onchange = () => setVariant(variant());
 $('movetime').onchange = renderPlayers;
 for (const id of ['threads', 'hash', 'nnue']) $(id).onchange = () => {
     stopSearch();
@@ -335,26 +352,124 @@ for (const id of ['threads', 'hash', 'nnue']) $(id).onchange = () => {
 $('fen-form').onsubmit = e => {
     e.preventDefault();
     const fen = $('fen').value.trim();
+    let g;
     try {
-        new Chess(fen);
+        g = makeGame(fen);
     } catch (err) {
         return setStatus('Invalid FEN: ' + err.message, true);
     }
-    const g = new Chess(fen);
     newGame(g.turn() === 'w' ? 'white' : 'black', fen);
 };
 $('copy-pgn').onclick = async () => {
-    const g = new Chess(startFen);
-    if (startFen !== START_FEN) {
-        g.setHeader('SetUp', '1');
-        g.setHeader('FEN', startFen);
+    let pgn;
+    if (isToroidal()) {
+        pgn = game.pgn(startFen);
+    } else {
+        const g = new Chess(startFen);
+        if (startFen !== STANDARD_FEN) {
+            g.setHeader('SetUp', '1');
+            g.setHeader('FEN', startFen);
+        }
+        for (const m of history) g.move(m.san);
+        pgn = g.pgn();
     }
-    for (const m of history) g.move(m.san);
-    await navigator.clipboard.writeText(g.pgn());
+    await navigator.clipboard.writeText(pgn);
     $('copy-pgn').textContent = 'Copied';
     setTimeout(() => ($('copy-pgn').textContent = 'Copy PGN'), 1200);
 };
 
+// ---------------------------------------------------------------------------------------------
+// Variant switching and the 3D torus view
+
+function setVariant(v) {
+    $('variant').value = v;
+    if (location.hash.slice(1) !== v) setHash(v);
+    document.body.classList.toggle('toroidal', v === 'toroidal');
+    $('nnue-label').hidden = v === 'toroidal'; // the network was trained on orthodox chess
+    $('view3d').hidden = v !== 'toroidal';
+    if (v !== 'toroidal' && torus && torusShown) toggle3d();
+    if (engineReady) {
+        stopSearch();
+        applyOptions();
+        uci('ucinewgame');
+    }
+    newGame(humanColor);
+}
+
+function setHash(v) {
+    window.history.replaceState(null, '', '#' + v);
+}
+
+let torus = null;
+let torusShown = false;
+let torusBusy = false;
+let selected3d = null;
+
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+function updateTorus() {
+    if (!torus) return;
+    const pieces = new Map();
+    for (const f of 'abcdefgh') for (let r = 1; r <= 8; r++) {
+        const p = game.get(f + r);
+        if (p) pieces.set(f + r, p);
+    }
+    const last = history[history.length - 1];
+    torus.update({
+        pieces,
+        orientation,
+        lastMove: last ? [last.from, last.to] : null,
+        check: game.inCheck() ? game.turn() : null,
+        selected: selected3d,
+        dests: selected3d ? dests().get(selected3d) ?? [] : [],
+    });
+}
+
+// Click-to-move on the torus: select one of your pieces, then a highlighted square
+function onTorusClick(square) {
+    if (!humanToMove()) return;
+    const d = dests();
+    if (selected3d && (d.get(selected3d) ?? []).includes(square)) {
+        const from = selected3d;
+        selected3d = null;
+        onUserMove(from, square);
+        return;
+    }
+    selected3d = d.has(square) ? (selected3d === square ? null : square) : null;
+    updateTorus();
+}
+
+async function toggle3d() {
+    if (torusBusy) return;
+    torusBusy = true;
+    $('view3d').disabled = true;
+    if (!torus) {
+        torus = new TorusView($('board-wrap'), {
+            onSquareClick: onTorusClick,
+            colors: {
+                light: cssVar('--sq-light'), dark: cssVar('--sq-dark'),
+                neon: cssVar('--neon'), neonFaint: 'rgba(57, 255, 20, 0.28)',
+            },
+        });
+    }
+    updateTorus();
+    if (torusShown) {
+        $('view3d').textContent = 'Back to 2D…';
+        await torus.hide();
+        torusShown = false;
+        $('view3d').textContent = 'Show torus (3D)';
+    } else {
+        $('view3d').textContent = 'Rolling up…';
+        await torus.show();
+        torusShown = true;
+        $('view3d').textContent = 'Flatten to 2D';
+    }
+    $('view3d').disabled = false;
+    torusBusy = false;
+}
+
+$('view3d').onclick = toggle3d;
+
 renderPlayers();
-update();
+setVariant(location.hash.slice(1) === 'chess' ? 'chess' : 'toroidal');
 startEngine();

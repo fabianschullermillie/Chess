@@ -299,3 +299,29 @@ select option:checked { background: var(--neon); color: #000; }
     color: var(--fg);
     line-height: 1;
 }
+
+/* ---- Toroidal chess ---------------------------------------------------------------------- */
+
+.variant-title, .toroidal-only { display: none; }
+body.toroidal .variant-title { display: inline; color: var(--muted); font-weight: 400; }
+body.toroidal .toroidal-only { display: inline; }
+
+.buttons .wide { grid-column: 1 / -1; }
+#view3d { border-color: var(--neon-dim); }
+
+/* The 3D view lives on top of the 2D board in the same square */
+.torus-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: none;
+    z-index: 5;
+    cursor: grab;
+    touch-action: none;
+}
+.torus-canvas:active { cursor: grabbing; }
+.board-wrap.show-3d .torus-canvas { display: block; }
+.board-wrap.show-3d #board { visibility: hidden; }
+.board-wrap.show-3d { outline-color: transparent; }
+.settings label[hidden] { display: none; }

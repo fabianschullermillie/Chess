@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#000000">
-    <title>Wombat Chess</title>
-    <meta name="description" content="Play against Wombat, a UCI chess engine in C++ compiled to multithreaded WebAssembly.">
+    <title>Wombat Toroidal Chess</title>
+    <meta name="description" content="Play toroidal chess (and orthodox chess) against Wombat, a C++ engine compiled to multithreaded WebAssembly. With a 3D torus view.">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♞</text></svg>">
     <!-- SharedArrayBuffer (needed for the engine's threads) requires cross-origin isolation.
          GitHub Pages can't send the COOP/COEP headers, so a service worker adds them. -->
@@ -16,9 +16,10 @@
 </head>
 <body>
 <header>
-    <h1>Wombat</h1>
+    <h1>Wombat <span class="variant-title">· toroidal chess</span></h1>
     <p>A C++ chess engine running in your browser as multithreaded WebAssembly.
-        <a href="https://github.com/fabsch225/Wombat">Source</a></p>
+        <span class="toroidal-only">On the torus the a- and h-files are adjacent, and so are the 1st and 8th ranks.</span>
+        <a href="https://github.com/fabianschullermillie/Chess">Source</a></p>
 </header>
 
 <main>
@@ -29,7 +30,7 @@
                 <div class="evalbar-fill" id="evalbar-fill"></div>
                 <span id="evalbar-label">0.0</span>
             </div>
-            <div class="board-wrap">
+            <div class="board-wrap" id="board-wrap">
                 <div id="board" class="cg-wrap"></div>
                 <div id="promotion" class="promotion" hidden></div>
             </div>
@@ -43,9 +44,16 @@
             <button id="new-black">New game as Black</button>
             <button id="undo">Take back</button>
             <button id="flip">Flip board</button>
+            <button id="view3d" class="wide" hidden>Show torus (3D)</button>
         </div>
 
         <div class="settings">
+            <label>Variant
+                <select id="variant">
+                    <option value="toroidal" selected>Toroidal</option>
+                    <option value="chess">Standard</option>
+                </select>
+            </label>
             <label>Mode
                 <select id="mode">
                     <option value="play">Play vs. engine</option>
@@ -64,7 +72,7 @@
             <label>Threads
                 <select id="threads"></select>
             </label>
-            <label>Evaluation
+            <label id="nnue-label">Evaluation
                 <select id="nnue">
                     <option value="true" selected>NNUE</option>
                     <option value="false">Classical</option>
