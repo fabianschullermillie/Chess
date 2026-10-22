@@ -1,0 +1,13 @@
+Game 1: 1. a1a8 d5e4 2. d3d6 f8d6 3. h1h8 a6h8 4. f1c4 e6d7 5. a8h8 e5d4 6. c3d4 h6f5 7. e3e4 f5e7 8. c1a7 h7h6 9. a7d2 f6f5 10. e4d3 b7b5 11. c4b3 c8a6 12. d3c3 e7f1 13. b3e8 d7e7 14. e8f1 a6f1 15. d2g7 e7f7 16. g7h6 c6c5 17. a3c2 f7f6 18. h6e3 f6g7 19. d4c5 d6f8 20. c3b3 f1c4 21. b3a3 f8e7 22. a3b4 e7f8 23. h8f8 g7f8 24. c5c6 c4e6 25. h3a1 e6a2 26. c6c7 f8f1 27. b4b5 a2d7 28. b5a5 f1e8 29. h2h4 d7b1 30. h4h5 e8d7 31. c7c8q b1c8 32. c2e1 d7e6 33. e1c8 f5f4 34. e3c1 e6f5 35. h5h6 f5g6 36. h6h7 g6g7 37. c1f4 g7f6 38. h7h8q f6f5 39. h8e5 f5g6 40. e5e6 g6g7 41. f4e5 g7f8 42. e6g8 1-0 (checkmate)
+Final FEN: 2N2kQ1/8/8/K3B3/8/5P2/1P4P1/N7 b - - 8 42
+
+Game 2: 1. h3g1 h6b5 2. e4d5 c6d5 3. g1a8 d6d3 4. f1d3 e5d4 5. c3d4 b5h4 6. d3a6 h4a6 7. h1h8 a6h8 8. c1a7 f8a3 9. a7h8 a3g5 10. e3f2 g5b8 11. a8g7 e6d7 12. g7h5 b8a1 13. h8a1 f6f5 14. h5b6 d7d8 15. a1f6 d8c7 16. b6d5 c7d6 17. d5b4 d6e6 18. f6a1 e6f7 19. f2g1 b7b5 20. d4d5 f7e8 21. d5d6 e8f7 22. b4d5 c8b1 23. d5b6 f7e8 24. h2h4 b5b4 25. a1g7 b4b3 26. a2b3 e8f7 27. g1h8 f7e6 28. g7b4 h7h5 29. b6h5 b1c2 30. h5b6 c2e8 31. b6h7 e8c6 32. h7f8 e6f7 33. d6d7 c6d7 34. f8d7 f5f4 35. h4h5 f7e6 36. d7b6 e6f7 37. h5h6 f7e8 38. h6h7 e8d8 39. h8a1 d8c7 40. h7h8q c7b7 41. h8h6 b7c7 42. h6b8 c7c6 43. b4g1 c6b5 44. b8a7 b5c6 45. a7d7 1-0 (checkmate)
+Final FEN: 8/3Q4/1Nk5/8/5p2/1P3P2/1P4P1/K5B1 b - - 10 45
+
+Game 3: 1. d4e5 b7b6 2. e5d6 f8d6 3. a1a8 d6c5 4. e3d2 h8a8 5. f1c6 e6d6 6. d2c2 c8d1 7. h1d1 a8d8 8. d1d8 d6e7 9. d8h8 e7f7 10. c6d5 f7g6 11. d3h7 1-0 (checkmate)
+Final FEN: 7R/p5pQ/np3pkn/2bB4/4P3/N1P2P1N/PPK3PP/2B5 b - - 0 11
+
+Game 4: 1. c1a7 d6b4 2. c3b4 a8a1 3. h1a1 h6f7 4. a7h8 a6h8 5. e4d5 c6d5 6. a1a8 f8e1 7. f1h7 f7d6 8. a8h8 e6e7 9. a3h5 c8d7 10. d4e5 d6f7 11. h8b8 e1d8 12. e5f6 g7f6 13. b8b7 d8c1 14. e3d4 f7e5 15. h7b1 e7f8 16. d3a8 f8e1 17. b1d7 e5g6 18. a8g6 e1d2 19. g6d3 d2e1 20. b7b1 e1f8 21. b1c1 f8e7 22. d4d5 f6f5 23. c1c7 e7f8 24. d3f1 1-0 (checkmate)
+Final FEN: 5k2/2RB4/8/3K1p1N/1P6/5P1N/PP4PP/5Q2 b - - 3 24
+
+White wins 4, draws 0, Black wins 0
