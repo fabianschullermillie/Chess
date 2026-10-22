@@ -12,7 +12,7 @@ cmake --build "$BUILD" -j "${JOBS:-4}"
 rm -rf "$SITE"
 mkdir -p "$SITE"
 cp "$BUILD/wombat.js" "$BUILD/wombat.wasm" "$SITE/"
-cp -R "$ROOT/web/index.html" "$ROOT/web/style.css" "$ROOT/web/app.js" "$ROOT/web/variants.js" "$ROOT/web/torus3d.js" "$ROOT/web/engine-worker.js" \
+cp -R "$ROOT/web/index.html" "$ROOT/web/style.css" "$ROOT/web/app.js" "$ROOT/web/variants.js" "$ROOT/web/torus3d.js" "$ROOT/web/pieces3d.js" "$ROOT/web/engine-worker.js" \
       "$ROOT/web/coi-serviceworker.min.js" "$ROOT/web/vendor" "$SITE/"
 touch "$SITE/.nojekyll"
 echo "Site ready in $SITE"
