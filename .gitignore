@@ -5,3 +5,6 @@ local.properties
 *.apk
 *.zip
 .idea/
+fixtures/
+tools/compat/node_modules/
+tools/compat/verify.bundle.js

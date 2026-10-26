@@ -10,10 +10,21 @@ android {
         applicationId = "dev.inkcalidraw"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1-prototype"
+        versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        versionName = "0.2-prototype." + (System.getenv("GITHUB_RUN_NUMBER") ?: "local")
     }
-    buildTypes { release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("debug") } }
+    // Prototype-only key committed to the repo so every CI build installs over the previous one.
+    // Replace with a secret-backed key before publishing anywhere.
+    signingConfigs {
+        create("prototype") {
+            storeFile = rootProject.file("prototype.keystore")
+            storePassword = "inkcalidraw"; keyAlias = "prototype"; keyPassword = "inkcalidraw"
+        }
+    }
+    buildTypes {
+        debug { signingConfig = signingConfigs.getByName("prototype") }
+        release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("prototype") }
+    }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     testOptions { unitTests.isReturnDefaultValues = true }
 }
@@ -27,6 +38,7 @@ dependencies {
     implementation("androidx.activity:activity-ktx:1.13.0")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.input:input-motionprediction:1.0.0")
+    implementation("androidx.documentfile:documentfile:1.1.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     testImplementation("junit:junit:4.13.2")

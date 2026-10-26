@@ -1,0 +1,58 @@
+name: Build prototype APK
+
+on:
+  push:
+    branches: [inkcalidraw]
+  workflow_dispatch:
+
+concurrency:
+  group: inkcalidraw-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests (writes Excalidraw fixtures)
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check fixtures against the real Excalidraw package
+        working-directory: tools/compat
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npm run check
+
+      - name: Build APK
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: inkcalidraw-apk-${{ github.run_number }}
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+
+      - name: Upload Excalidraw render check
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: excalidraw-render-check-${{ github.run_number }}
+          path: |
+            fixtures/rendered-by-excalidraw.png
+            fixtures/scene.excalidraw
+          if-no-files-found: ignore

@@ -1,11 +1,23 @@
 # Inkcalidraw (prototype)
 
-Native Android stylus drawing app that reads and writes `.excalidraw` files.
+Native Android stylus note app (built for a Galaxy Tab S9 + S Pen) whose notes are plain `.excalidraw` files.
 
-- Wet ink: Jetpack Ink (`androidx.ink`) front-buffered, low-latency rendering with motion prediction.
-- Dry ink: a Kotlin port of perfect-freehand 1.2.0 with Excalidraw's exact freedraw options, so strokes
-  render identically on Android and in Excalidraw (verified byte-identical SVG paths against `@excalidraw/excalidraw` 0.18.1).
-- Unknown elements and fields are preserved verbatim on save.
-- S Pen draws, side button / eraser tip erases, fingers pan & pinch-zoom.
+## Features
+- **Low-latency ink**: Jetpack Ink (`androidx.ink`) front-buffered rendering + motion prediction, pressure-sensitive.
+- **Excalidraw-exact strokes**: committed strokes use a Kotlin port of perfect-freehand 1.2.0 with Excalidraw's
+  freedraw options, so they look identical on excalidraw.com / Obsidian (verified byte-identical in CI).
+- **Multiple notes**: notes grid with thumbnails; new / rename / duplicate / share / delete / import.
+  Notes live in app storage or in any folder you pick (e.g. an Obsidian vault or a synced folder).
+- **Pen selection**: hold the S Pen side button (or use *Select*) and lasso strokes/images; drag to move,
+  then Recolor / Duplicate / Delete. Single images get a resize handle.
+- **Images from the clipboard**: *Paste* button, Ctrl+V, or drag & drop from a split-screen app. Stored as real
+  Excalidraw image elements (SHA-1 file ids, data URLs in `files`); large images are downscaled to 2400 px.
+- Pen, highlighter, eraser (tool or eraser tip), undo/redo (Ctrl+Z / Ctrl+Y), fingers pan & pinch-zoom.
+- Elements and fields the app doesn't understand are preserved on save.
 
-Build: `./gradlew assembleDebug` (needs Android SDK 36, JDK 17+).
+## Build
+`./gradlew assembleRelease` (Android SDK 36, JDK 17+). CI (`.github/workflows/android.yml`) runs the unit tests,
+checks the generated fixture file against the real `@excalidraw/excalidraw` package in headless Chromium
+(`tools/compat`), and uploads the APK as a workflow artifact.
+
+`prototype.keystore` is a throwaway key so CI builds install over each other; don't use it for a real release.

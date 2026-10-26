@@ -72,6 +72,13 @@ class FixtureTest {
         }
         scene.elements.add(0, Element(foreign))
 
+        // A pasted screenshot: PNG bytes -> files map keyed by SHA-1, referenced by an image element.
+        val bytes = javaClass.classLoader!!.getResourceAsStream("slide.png")!!.readBytes()
+        val fileId = java.security.MessageDigest.getInstance("SHA-1").digest(bytes).joinToString("") { "%02x".format(it) }
+        scene.addFile(fileId, "image/png", "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(bytes))
+        idx = FractionalIndex.after(idx)
+        scene.elements.add(ExcalidrawScene.newImage(fileId, 760.0, 60.0, 240.0, 140.0, idx))
+
         val sceneJson = scene.toJson()
         File(out, "scene.excalidraw").writeText(sceneJson)
 
