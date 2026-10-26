@@ -231,7 +231,16 @@ class EditorActivity : ComponentActivity() {
     private fun isPen(t: Int) = t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
     private fun draws(t: Int) = isPen(t) || (!penOnly && t == MotionEvent.TOOL_TYPE_FINGER)
 
+    /** Main-thread time spent handling touch events (read by the device tests). */
+    @Volatile var touchNanos = 0L
+    @Volatile var touchEvents = 0
+
     private fun onTouch(v: View, ev: MotionEvent) {
+        val t0 = System.nanoTime()
+        try { handleTouch(v, ev) } finally { touchNanos += System.nanoTime() - t0; touchEvents++ }
+    }
+
+    private fun handleTouch(v: View, ev: MotionEvent) {
         val idx = ev.actionIndex
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
@@ -908,6 +917,9 @@ class EditorActivity : ComponentActivity() {
     }
 
     private fun loaded(uri: Uri, parsed: ExcalidrawScene) {
+        // Parse points/bounds of every element in the background, so the first eraser or lasso
+        // gesture doesn't pay for it.
+        val warm = parsed.snapshot(); io.execute { warm.forEach { it.bounds } }
         try {
             scene = parsed
             meta = NoteMeta.readFrom(scene)

@@ -139,10 +139,14 @@ class CanvasSurface(context: Context, private val ui: Ui) : SurfaceView(context)
         prevTail = tail
         wetStrokeId = w.strokeId
 
+        // Clip in screen space, snapped to whole pixels, so the cleared area and the redrawn
+        // (anti-aliased) path cover exactly the same pixels: no seams at the dirty-rect edge.
+        val screen = RectF(dirty); w.matrix.mapRect(screen)
+        val px = android.graphics.Rect(); screen.roundOut(px)
         canvas.save()
-        canvas.concat(w.matrix)
-        canvas.clipRect(dirty)
+        canvas.clipRect(px)
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+        canvas.concat(w.matrix)
         wetPaint.color = w.color
         wetPaint.alpha = w.alpha
         wetPaint.shader = w.grain?.let { k -> grains.getOrPut(k) { PenProfiles.grainShader(k) } }
