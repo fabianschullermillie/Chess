@@ -108,12 +108,14 @@ class EditorDeviceTest {
 
     private fun wave(r: Rect, y: Float, n: Int = 90): List<FloatArray> = (0 until n).map { i ->
         val t = i / (n - 1f)
-        floatArrayOf(r.left + r.width() * (0.2f + 0.6f * t), y + 40f * sin(t * 4 * PI).toFloat(), (0.2f + 0.7f * sin(t * PI).toFloat()))
+        floatArrayOf(r.left + r.width() * (0.38f + 0.24f * t), y + 40f * sin(t * 4 * PI).toFloat(), (0.2f + 0.7f * sin(t * PI).toFloat()))
     }
 
     private fun shot(name: String): Bitmap {
         SystemClock.sleep(400)
-        val b = auto.takeScreenshot()
+        var b: Bitmap? = null
+        for (i in 0 until 5) { b = auto.takeScreenshot(); if (b != null) break; SystemClock.sleep(300) }
+        b!!
         File(shots, "$name.png").outputStream().use { b.compress(Bitmap.CompressFormat.PNG, 100, it) }
         return b
     }

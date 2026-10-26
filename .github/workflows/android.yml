@@ -97,17 +97,20 @@ jobs:
           disk-size: 4096M
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          # Installed and run by hand (not connectedAndroidTest) so the app isn't uninstalled before we pull screenshots.
           script: |
-            ./gradlew --no-daemon connectedDebugAndroidTest || touch device-tests-failed
+            adb install -r -g app/build/outputs/apk/debug/app-debug.apk
+            adb install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+            adb shell am instrument -w -r dev.inkcalidraw.test/androidx.test.runner.AndroidJUnitRunner > instrument.txt || true
             mkdir -p device-screens && adb pull /sdcard/Android/data/dev.inkcalidraw/files/screens device-screens/ || true
-            test ! -f device-tests-failed
+            cp instrument.txt device-screens/ || true
+            grep -E "^(OK|FAILURES|Tests run)" instrument.txt || true
+            grep -q "^OK (" instrument.txt
 
       - name: Upload screenshots and test report
         if: always()
         uses: actions/upload-artifact@v5
         with:
           name: device-test-screens-${{ github.run_number }}
-          path: |
-            device-screens/
-            app/build/reports/androidTests/
+          path: device-screens/
           if-no-files-found: ignore
