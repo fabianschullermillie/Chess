@@ -50,6 +50,7 @@ class CanvasSurface(context: Context, private val ui: Ui) : SurfaceView(context)
         val strokeWidth: Double,
         val alpha: Int,
         val matrix: Matrix,
+        val grain: String? = null,
     )
 
     @Volatile private var frame: Frame? = null
@@ -59,6 +60,7 @@ class CanvasSurface(context: Context, private val ui: Ui) : SurfaceView(context)
     // ---- render-thread state ----
     private val sceneRenderer = SceneRenderer(dark = ui.dark)
     private val wetPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val grains = HashMap<String, android.graphics.Shader>()
     private var wetStrokeId = -1
     private var prevTail: RectF? = null
     private val overlayStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = ui.accent }
@@ -143,6 +145,7 @@ class CanvasSurface(context: Context, private val ui: Ui) : SurfaceView(context)
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
         wetPaint.color = w.color
         wetPaint.alpha = w.alpha
+        wetPaint.shader = w.grain?.let { k -> grains.getOrPut(k) { PenProfiles.grainShader(k) } }
         canvas.drawPath(path, wetPaint)
         canvas.restore()
     }

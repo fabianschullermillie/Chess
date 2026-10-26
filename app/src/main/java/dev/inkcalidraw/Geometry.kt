@@ -62,8 +62,11 @@ object Geometry {
         return inside
     }
 
-    /** Scene-space bounding box of an element (rotation ignored; good enough for hit tests and culling). */
-    fun bounds(el: Element): Box {
+    /** Scene-space bounding box of an element (cached on the element). */
+    fun bounds(el: Element): Box = el.bounds
+
+    /** Rotation ignored; good enough for hit tests and culling. */
+    fun computeBounds(el: Element): Box {
         if (el.type == "freedraw" || el.type == "line" || el.type == "arrow") {
             val pts = el.points
             if (pts.isNotEmpty()) {
@@ -81,7 +84,7 @@ object Geometry {
         for (e in elements) {
             if (e.isDeleted || (!includeFrames && e.type == "frame")) continue
             val b = bounds(e)
-            r = r?.union(b) ?: b
+            r = r?.union(b) ?: Box(b.minX, b.minY, b.maxX, b.maxY)
         }
         return r
     }

@@ -77,6 +77,7 @@ private fun popupShell(ctx: Context, ui: Ui, title: String): Pair<PopupWindow, L
     }
     val scroll = ScrollView(ctx).apply { addView(col) }
     val pw = PopupWindow(scroll, ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, true).apply {
+        softInputMode = android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
         setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT)); elevation = ui.dp(8); isOutsideTouchable = true
     }
     return pw to col
@@ -115,7 +116,7 @@ fun showColorPopup(anchor: View, ui: Ui, current: String, history: List<String>,
     val preview = View(ctx)
     val hex = EditText(ctx).apply {
         setText(current); textSize = 15f; setTextColor(ui.text); isSingleLine = true
-        setEms(6)
+        setEms(6); isFocusableInTouchMode = true
     }
     val use = TextView(ctx).apply {
         text = "Use"; textSize = 15f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
@@ -143,33 +144,54 @@ fun showColorPopup(anchor: View, ui: Ui, current: String, history: List<String>,
 }
 
 /** Thickness submenu with real perfect-freehand previews of each width. */
-fun showThicknessPopup(anchor: View, ui: Ui, widths: List<Double>, current: Double, color: String, opacity: Int, onPick: (Double) -> Unit) {
+fun showThicknessPopup(anchor: View, ui: Ui, widths: List<Double>, current: Double, color: String, opacity: Int, grain: String?, onPick: (Double) -> Unit) {
     val ctx = anchor.context
     val (pw, col) = popupShell(ctx, ui, "Thickness")
     for (w in widths) {
-        col.addView(StrokePreview(ctx, ui, w, color, opacity, w == current).apply {
+        col.addView(StrokePreview(ctx, ui, w, color, opacity, w == current, grain, null).apply {
             setOnClickListener { onPick(w); pw.dismiss() }
-        }, LinearLayout.LayoutParams(ui.dpi(240), ui.dpi(44)))
+        }, LinearLayout.LayoutParams(ui.dpi(240), ui.dpi(40)))
     }
     pw.showAsDropDown(anchor, 0, ui.dpi(4))
 }
 
-private class StrokePreview(ctx: Context, private val ui: Ui, private val w: Double, color: String, opacity: Int, private val selected: Boolean) : View(ctx) {
+/** Pen type submenu: one live preview per profile in its own colour and width. */
+fun showProfilePopup(anchor: View, ui: Ui, profiles: List<PenProfile>, current: String, cfg: (String) -> PenConfig, onPick: (String) -> Unit) {
+    val ctx = anchor.context
+    val (pw, col) = popupShell(ctx, ui, "Pen type")
+    for (p in profiles) {
+        val c = cfg(p.id)
+        col.addView(StrokePreview(ctx, ui, maxOf(c.strokeWidth, 1.0), c.color, c.opacity, p.id == current, p.grain, p.label, constant = !p.pressure).apply {
+            setOnClickListener { onPick(p.id); pw.dismiss() }
+        }, LinearLayout.LayoutParams(ui.dpi(280), ui.dpi(48)))
+    }
+    pw.showAsDropDown(anchor, 0, ui.dpi(4))
+}
+
+private class StrokePreview(
+    ctx: Context, private val ui: Ui, private val w: Double, color: String, opacity: Int, private val selected: Boolean,
+    grain: String?, private val title: String?, private val constant: Boolean = false,
+) : View(ctx) {
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         this.color = ui.sceneColor(SceneRenderer.parseColor(color, Color.BLACK)); alpha = opacity * 255 / 100
+        shader = grain?.let { PenProfiles.grainShader(it) }
     }
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = ui.subtext; textSize = ui.dp(12) }
     private val sel = Paint(Paint.ANTI_ALIAS_FLAG).apply { this.color = ui.accentSoft }
 
     override fun onDraw(c: Canvas) {
         if (selected) c.drawRoundRect(RectF(0f, 0f, width.toFloat(), height.toFloat()), ui.dp(8), ui.dp(8), sel)
+        val left = if (title != null) ui.dp(100) else ui.dp(12)
         val pts = (0..40).map { i ->
             val t = i / 40.0
-            doubleArrayOf(ui.dp(12) + t * (width - ui.dp(70)), height / 2.0 + sin(t * 2 * PI) * height * 0.18, 0.3 + 0.5 * sin(t * PI))
+            doubleArrayOf(left + t * (width - left - ui.dp(58)), height / 2.0 + sin(t * 2 * PI) * height * 0.18, if (constant) 0.5 else 0.3 + 0.5 * sin(t * PI))
         }
-        val path = SceneRenderer.outlinePath(PerfectFreehand.getStroke(pts, PerfectFreehand.excalidrawOptions(w * ui.dp(1), false, false)))
+        // preview at 100% zoom, but never taller than the row
+        val shown = minOf(w * ui.dp(1), height * 0.42 / 4.25 / 1.35)
+        val path = SceneRenderer.outlinePath(PerfectFreehand.getStroke(pts, PerfectFreehand.excalidrawOptions(shown, false, false)))
         c.drawPath(path, fill)
-        c.drawText(if (w % 1.0 == 0.0) w.toInt().toString() else w.toString(), width - ui.dp(40), height / 2f + ui.dp(4), label)
+        if (title != null) { label.color = ui.text; label.textSize = ui.dp(14); c.drawText(title, ui.dp(12), height / 2f + ui.dp(5), label) }
+        else c.drawText(if (w % 1.0 == 0.0) w.toInt().toString() else w.toString(), width - ui.dp(46), height / 2f + ui.dp(4), label)
     }
 }
 

@@ -35,13 +35,18 @@ class SceneRenderer(private val dark: Boolean = false, private val syncImages: B
         /** Paged notes: draw a desk colour outside and white sheets for pages. */
         val paged: Boolean = false,
         val deskColor: Int = Color.LTGRAY,
+        /** Screen pixels per scene unit (picks the PDF page resolution). */
+        val scale: Float = 1f,
+        /** Background bitmap for a PDF-backed page frame, or null if not (yet) available. */
+        val pageImage: ((Element, Float) -> android.graphics.Bitmap?)? = null,
     )
 
     /** Called (from a background thread) when an image finished decoding and a redraw would show it. */
     var onImageReady: (() -> Unit)? = null
 
-    private val pathCache = HashMap<String, Path>()
-    private val boundsCache = HashMap<String, Geometry.Box>()
+    /** Keyed by element identity: elements are immutable, an edit creates a new object. */
+    private val pathCache = java.util.WeakHashMap<Element, Path>()
+    private val grains = HashMap<String, android.graphics.Shader>()
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
@@ -54,15 +59,24 @@ class SceneRenderer(private val dark: Boolean = false, private val syncImages: B
 
     fun draw(c: Canvas, input: Input) {
         val bg = color(parseColor(input.background, Color.WHITE))
-        val pages = if (input.paged) Pages.pages(input.elements) else emptyList()
         c.drawColor(if (input.paged) input.deskColor else bg)
-        for (p in pages) {
-            val r = RectF(p.x.toFloat(), p.y.toFloat(), (p.x + p.w).toFloat(), (p.y + p.h).toFloat())
-            if (input.offsetIds.isEmpty() || true) {
-                c.drawRect(RectF(r.left + 2f, r.top + 3f, r.right + 2f, r.bottom + 4f), shadow)
+        for (f in input.elements) {
+            if (f.type != "frame" || f.isDeleted) continue
+            if (f.pageNumber == null) continue
+            if (!input.paged && f.pdfFile == null) continue
+            if (input.visible != null && !f.bounds.intersects(input.visible)) continue
+            val r = RectF(f.x.toFloat(), f.y.toFloat(), (f.x + f.width).toFloat(), (f.y + f.height).toFloat())
+            if (input.paged) c.drawRect(RectF(r.left + 2f, r.top + 3f, r.right + 2f, r.bottom + 4f), shadow)
+            val bmp = if (f.pdfFile != null) input.pageImage?.invoke(f, input.scale) else null
+            if (bmp != null) {
+                // In dark mode PDF pages get the same colour transform as the ink, so ink stays readable on them.
+                imagePaint.alpha = 255; imagePaint.colorFilter = if (dark) DARK_FILTER else null
+                c.drawBitmap(bmp, null, r, imagePaint)
+                imagePaint.colorFilter = null
+            } else {
+                fill.color = bg; fill.alpha = 255
+                c.drawRect(r, fill)
             }
-            fill.color = bg; fill.alpha = 255
-            c.drawRect(r, fill)
         }
         val frames = HashMap<String, RectF>()
         for (el in input.elements) if (el.type == "frame" && !el.isDeleted) {
@@ -88,9 +102,9 @@ class SceneRenderer(private val dark: Boolean = false, private val syncImages: B
         }
     }
 
-    fun boundsOf(el: Element): Geometry.Box = boundsCache.getOrPut("${el.id}:${el.version}") { Geometry.bounds(el) }
+    fun boundsOf(el: Element): Geometry.Box = el.bounds
 
-    fun freedrawPath(el: Element): Path = pathCache.getOrPut("${el.id}:${el.version}") { outlinePath(el.freedrawOutline()) }
+    fun freedrawPath(el: Element): Path = pathCache.getOrPut(el) { outlinePath(el.freedrawOutline()) }
 
     private fun drawElement(c: Canvas, el: Element, input: Input) {
         val alpha = (el.opacity / 100.0 * 255).toInt().coerceIn(0, 255)
@@ -98,7 +112,12 @@ class SceneRenderer(private val dark: Boolean = false, private val syncImages: B
         c.translate(el.x.toFloat(), el.y.toFloat())
         if (el.angle != 0.0) c.rotate(Math.toDegrees(el.angle).toFloat(), (el.width / 2).toFloat(), (el.height / 2).toFloat())
         when (el.type) {
-            "freedraw" -> { fill.color = col; fill.alpha = alpha; c.drawPath(freedrawPath(el), fill) }
+            "freedraw" -> {
+                fill.color = col; fill.alpha = alpha
+                fill.shader = el.brush?.let { b -> if (b == "pencil" || b == "chalk") grains.getOrPut(b) { PenProfiles.grainShader(b) } else null }
+                c.drawPath(freedrawPath(el), fill)
+                fill.shader = null
+            }
             "rectangle", "diamond", "ellipse" -> {
                 val r = RectF(0f, 0f, el.width.toFloat(), el.height.toFloat())
                 if (el.backgroundColor != "transparent") {
@@ -167,6 +186,14 @@ class SceneRenderer(private val dark: Boolean = false, private val syncImages: B
             override fun sizeOf(key: String, value: Bitmap) = value.allocationByteCount
         }
         private val pending = ConcurrentHashMap<String, Boolean>()
+
+        /** invert(0.93) then hue-rotate(180deg), as one colour matrix (rows of the hue matrix sum to 1). */
+        val DARK_FILTER = android.graphics.ColorMatrixColorFilter(android.graphics.ColorMatrix(floatArrayOf(
+            -0.86f * -0.574f, -0.86f * 1.430f, -0.86f * 0.144f, 0f, 237.15f,
+            -0.86f * 0.426f, -0.86f * 0.430f, -0.86f * 0.144f, 0f, 237.15f,
+            -0.86f * 0.426f, -0.86f * 1.430f, -0.86f * -0.856f, 0f, 237.15f,
+            0f, 0f, 0f, 1f, 0f,
+        )))
         private val decoder = Executors.newFixedThreadPool(2)
 
         private fun decode(fileId: String, dataUrl: (String) -> String?): Bitmap? {

@@ -48,7 +48,7 @@ object Pages {
     }
 
     /** Appends a page; returns the new frame element. */
-    fun addPage(scene: ExcalidrawScene, orientation: PageOrientation, dir: PageDirection, w: Double? = null, h: Double? = null): Element {
+    fun addPage(scene: ExcalidrawScene, orientation: PageOrientation, dir: PageDirection, w: Double? = null, h: Double? = null, pdfFile: String? = null, pdfPage: Int? = null): Element {
         val existing = pages(scene)
         val (dw, dh) = size(orientation)
         val pw = w ?: dw; val ph = h ?: dh
@@ -56,7 +56,7 @@ object Pages {
         val origin = if (existing.isEmpty()) Geometry.contentBounds(scene.elements)?.let { (it.maxX + 200) to it.minY } ?: (0.0 to 0.0) else 0.0 to 0.0
         val (x, y) = nextSlot(existing, pw, ph, dir, origin)
         val n = (existing.maxOfOrNull { it.number } ?: 0) + 1
-        val frame = ExcalidrawScene.newFrame("Page $n", x, y, pw, ph, FractionalIndex.after(scene.lastIndex()), n)
+        val frame = ExcalidrawScene.newFrame("Page $n", x, y, pw, ph, FractionalIndex.after(scene.lastIndex()), n, pdfFile, pdfPage)
         scene.elements.add(frame)
         return frame
     }

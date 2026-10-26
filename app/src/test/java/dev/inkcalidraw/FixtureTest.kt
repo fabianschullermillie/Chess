@@ -117,15 +117,18 @@ class FixtureTest {
         scene.elements.add(ExcalidrawScene.newFreedraw(penStroke(560f, 620f, 7), "#e03131", 2.0, FractionalIndex.after(scene.lastIndex()), frameId = p1.id))
         scene.elements.add(ExcalidrawScene.newFreedraw(penStroke(120f, (p2.y + 200).toFloat(), 8), "#1971c2", 3.0, FractionalIndex.after(scene.lastIndex()), frameId = p2.id))
         scene.elements.add(ExcalidrawScene.newFreedraw(penStroke(120f, (p2.y + 400).toFloat(), 9), "#ffd43b", 8.0, FractionalIndex.after(scene.lastIndex()), opacity = 40, frameId = p2.id))
-        NoteMeta(tool = "highlighter", pen = PenConfig("#2f9e44", 1.5, 100), highlighter = PenConfig("#ffd43b", 8.0, 40), paged = true).writeTo(scene)
+        NoteMeta(tool = "highlighter", profile = "pencil", pens = mapOf("pen" to PenConfig("#2f9e44", 1.5, 100), "highlighter" to PenConfig("#ffd43b", 8.0, 40)), paged = true).writeTo(scene)
+        // a pencil stroke (app renders grain; Excalidraw shows a normal freedraw)
+        scene.elements.add(ExcalidrawScene.newFreedraw(penStroke(400f, (p2.y + 600).toFloat(), 10), "#495057", 1.0, FractionalIndex.after(scene.lastIndex()), opacity = 90, frameId = p2.id, brush = "pencil"))
         File(out, "paged.excalidraw").writeText(scene.toJson())
 
         // meta round-trips
         val back = NoteMeta.readFrom(ExcalidrawScene.parse(scene.toJson()))
-        assertEquals("highlighter", back.tool); assertEquals(PenConfig("#2f9e44", 1.5, 100), back.pen); assertTrue(back.paged)
+        assertEquals("highlighter", back.tool); assertEquals("pencil", back.profile)
+        assertEquals(PenConfig("#2f9e44", 1.5, 100), back.penFor("pen")); assertEquals(PenConfig("#ffd43b", 8.0, 40), back.activePen()); assertTrue(back.paged)
 
         // relayout to horizontal moves page 2 and its strokes by the same delta
-        val before = scene.elements.first { it.frameId == p2.id }
+        val before = scene.elements.first { it.frameId == p2.id && it.type == "freedraw" }
         Pages.relayout(scene, PageDirection.HORIZONTAL)
         val p2After = Pages.pages(scene)[1]
         val after = scene.elements.first { it.id == before.id }

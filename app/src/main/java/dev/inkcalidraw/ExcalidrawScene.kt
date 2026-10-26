@@ -22,33 +22,38 @@ import kotlin.random.Random
  * An Excalidraw element kept as its raw JSON object, so every field we don't understand
  * (bindings, frames, custom data, fields added by future Excalidraw versions) survives a round-trip.
  */
-class Element(var json: JsonObject) {
-    val id: String get() = json.str("id") ?: ""
-    val type: String get() = json.str("type") ?: ""
-    val isDeleted: Boolean get() = json["isDeleted"]?.jsonPrimitive?.booleanOrNull ?: false
+class Element(val json: JsonObject) {
+    // Elements are immutable (edits go through withChanges), so parsed values are cached.
+    val id: String by lazy(LazyThreadSafetyMode.PUBLICATION) { json.str("id") ?: "" }
+    val type: String by lazy(LazyThreadSafetyMode.PUBLICATION) { json.str("type") ?: "" }
+    val isDeleted: Boolean by lazy(LazyThreadSafetyMode.PUBLICATION) { json["isDeleted"]?.jsonPrimitive?.booleanOrNull ?: false }
     val version: Int get() = json["version"]?.jsonPrimitive?.intOrNull ?: 1
-    val x: Double get() = json.num("x")
-    val y: Double get() = json.num("y")
-    val width: Double get() = json.num("width")
-    val height: Double get() = json.num("height")
+    val x: Double by lazy(LazyThreadSafetyMode.PUBLICATION) { json.num("x") }
+    val y: Double by lazy(LazyThreadSafetyMode.PUBLICATION) { json.num("y") }
+    val width: Double by lazy(LazyThreadSafetyMode.PUBLICATION) { json.num("width") }
+    val height: Double by lazy(LazyThreadSafetyMode.PUBLICATION) { json.num("height") }
     val angle: Double get() = json.num("angle")
     val strokeColor: String get() = json.str("strokeColor") ?: "#1e1e1e"
     val backgroundColor: String get() = json.str("backgroundColor") ?: "transparent"
-    val strokeWidth: Double get() = json["strokeWidth"]?.jsonPrimitive?.doubleOrNull ?: 1.0
+    val strokeWidth: Double by lazy(LazyThreadSafetyMode.PUBLICATION) { json["strokeWidth"]?.jsonPrimitive?.doubleOrNull ?: 1.0 }
     val opacity: Double get() = json["opacity"]?.jsonPrimitive?.doubleOrNull ?: 100.0
     val index: String? get() = json.str("index")
 
-    /** Points relative to (x, y), as [x, y] pairs. */
-    val points: List<DoubleArray>
-        get() = (json["points"] as? JsonArray)?.map { p ->
+    /** Points relative to (x, y), as [x, y] pairs (parsed once). */
+    val points: List<DoubleArray> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        (json["points"] as? JsonArray)?.map { p ->
             val a = p.jsonArray; doubleArrayOf(a[0].jsonPrimitive.doubleOrNull ?: 0.0, a[1].jsonPrimitive.doubleOrNull ?: 0.0)
         } ?: emptyList()
+    }
 
-    val pressures: List<Double>
-        get() = (json["pressures"] as? JsonArray)?.map { it.jsonPrimitive.doubleOrNull ?: 0.5 } ?: emptyList()
+    val pressures: List<Double> by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        (json["pressures"] as? JsonArray)?.map { it.jsonPrimitive.doubleOrNull ?: 0.5 } ?: emptyList()
+    }
+
+    /** Scene-space bounding box (cached). */
+    val bounds: Geometry.Box by lazy(LazyThreadSafetyMode.PUBLICATION) { Geometry.computeBounds(this) }
 
     val simulatePressure: Boolean get() = json["simulatePressure"]?.jsonPrimitive?.booleanOrNull ?: true
-    val hasLastCommittedPoint: Boolean get() = json["lastCommittedPoint"].let { it != null && it !is JsonNull }
 
     /** Exactly the input Excalidraw feeds into perfect-freehand for a freedraw element. */
     fun freedrawInput(): List<DoubleArray> {
@@ -66,13 +71,19 @@ class Element(var json: JsonObject) {
     )
 
     val fileId: String? get() = json.str("fileId")
-    val frameId: String? get() = json.str("frameId")
+    val frameId: String? by lazy(LazyThreadSafetyMode.PUBLICATION) { json.str("frameId") }
     val name: String? get() = json.str("name")
-    val locked: Boolean get() = json["locked"]?.jsonPrimitive?.booleanOrNull ?: false
+    val locked: Boolean by lazy(LazyThreadSafetyMode.PUBLICATION) { json["locked"]?.jsonPrimitive?.booleanOrNull ?: false }
     val customData: JsonObject? get() = json["customData"] as? JsonObject
 
     /** Our page frames carry customData.inkcalidrawPage = page number. */
-    val pageNumber: Int? get() = (customData?.get("inkcalidrawPage") as? JsonPrimitive)?.intOrNull
+    val pageNumber: Int? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("inkcalidrawPage") as? JsonPrimitive)?.intOrNull }
+    /** PDF-backed pages: customData.pdfPage = 0-based page in the note's PDF. */
+    val pdfPage: Int? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("pdfPage") as? JsonPrimitive)?.intOrNull }
+    /** PDF-backed pages: customData.pdfFile = PDF file name next to the note. */
+    val pdfFile: String? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("pdfFile") as? JsonPrimitive)?.content }
+    /** App brush (pen profile) used for a freedraw element; Excalidraw ignores it. */
+    val brush: String? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("inkcalidrawBrush") as? JsonPrimitive)?.content }
 
     /** Image flip, Excalidraw's `scale: [sx, sy]` (each 1 or -1). */
     val imageScale: Pair<Float, Float>
@@ -146,6 +157,12 @@ class ExcalidrawScene(
     /** Snapshot of the elements list safe to hand to another thread (elements themselves are immutable). */
     fun snapshot(): List<Element> = elements.toList()
 
+    /** Cheap copy (shares immutable elements/JSON) whose toJson() can run on a background thread. */
+    fun copyForSave(): ExcalidrawScene {
+        val m = HashMap<String, JsonElement>(meta); m["files"] = JsonObject(files.toMap())
+        return ExcalidrawScene(JsonObject(m), elements.toMutableList())
+    }
+
     fun toJson(): String {
         val out = buildJsonObject {
             put("type", meta["type"] ?: JsonPrimitive("excalidraw"))
@@ -188,6 +205,7 @@ class ExcalidrawScene(
             index: String?,
             opacity: Int = 100,
             frameId: String? = null,
+            brush: String? = null,
         ): Element {
             require(samples.isNotEmpty())
             // Excalidraw discards freedraw elements with < 2 points on load; a tap in Excalidraw
@@ -229,6 +247,7 @@ class ExcalidrawScene(
                 put("pressures", buildJsonArray { samples.forEach { add(JsonPrimitive(r2(it[2].toDouble().coerceIn(0.0, 1.0)))) } })
                 put("simulatePressure", false)
                 put("lastCommittedPoint", JsonNull)
+                if (brush != null && brush != "pen") put("customData", buildJsonObject { put("inkcalidrawBrush", brush) })
             })
         }
 
@@ -257,7 +276,7 @@ class ExcalidrawScene(
         }
 
         /** An Excalidraw frame, used as a page. Excalidraw clips elements whose frameId points at it. */
-        fun newFrame(name: String, x: Double, y: Double, width: Double, height: Double, index: String?, pageNumber: Int): Element =
+        fun newFrame(name: String, x: Double, y: Double, width: Double, height: Double, index: String?, pageNumber: Int, pdfFile: String? = null, pdfPage: Int? = null): Element =
             Element(buildJsonObject {
                 put("id", randomId()); put("type", "frame")
                 put("x", x); put("y", y); put("width", width); put("height", height); put("angle", 0)
@@ -272,7 +291,10 @@ class ExcalidrawScene(
                 put("boundElements", JsonNull); put("updated", System.currentTimeMillis())
                 put("link", JsonNull); put("locked", false)
                 put("name", name)
-                put("customData", buildJsonObject { put("inkcalidrawPage", pageNumber) })
+                put("customData", buildJsonObject {
+                    put("inkcalidrawPage", pageNumber)
+                    if (pdfFile != null) { put("pdfFile", pdfFile); put("pdfPage", pdfPage ?: 0) }
+                })
             })
 
         private const val ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"

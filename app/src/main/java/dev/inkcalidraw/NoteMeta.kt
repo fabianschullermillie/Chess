@@ -33,14 +33,18 @@ enum class PageOrientation { PORTRAIT, LANDSCAPE }
  */
 data class NoteMeta(
     val tool: String = "pen",
-    val pen: PenConfig = DEFAULT_PEN,
-    val highlighter: PenConfig = DEFAULT_HIGHLIGHTER,
-    /** null = infinite whiteboard; otherwise the note is made of pages (frames). */
+    /** Active pen profile for the pen tool (see PenProfiles). */
+    val profile: String = "pen",
+    /** Settings per pen profile id, including "highlighter". */
+    val pens: Map<String, PenConfig> = emptyMap(),
     val paged: Boolean = false,
     val direction: PageDirection = PageDirection.VERTICAL,
     val orientation: PageOrientation = PageOrientation.PORTRAIT,
 ) {
-    fun activePen(): PenConfig = if (tool == "highlighter") highlighter else pen
+    fun penFor(profileId: String): PenConfig = pens[profileId] ?: PenProfiles.byId(profileId).default
+    fun activeProfileId(): String = if (tool == "highlighter") "highlighter" else profile
+    fun activePen(): PenConfig = penFor(activeProfileId())
+    fun withPen(profileId: String, cfg: PenConfig) = copy(pens = pens + (profileId to cfg))
 
     fun writeTo(scene: ExcalidrawScene) {
         val active = activePen()
@@ -50,10 +54,11 @@ data class NoteMeta(
             "currentItemOpacity" to JsonPrimitive(active.opacity),
         )
         val old = scene.appData.toMutableMap()
-        old["version"] = JsonPrimitive(1)
+        old["version"] = JsonPrimitive(2)
         old["tool"] = JsonPrimitive(tool)
-        old["pen"] = pen.toJson()
-        old["highlighter"] = highlighter.toJson()
+        old["profile"] = JsonPrimitive(profile)
+        old["pens"] = buildJsonObject { (PenProfiles.all + PenProfiles.highlighter).forEach { put(it.id, penFor(it.id).toJson()) } }
+        old.remove("pen"); old.remove("highlighter")
         old["pages"] = buildJsonObject {
             put("enabled", paged)
             put("direction", direction.name.lowercase())
@@ -64,24 +69,26 @@ data class NoteMeta(
     }
 
     companion object {
-        val DEFAULT_PEN = PenConfig("#1e1e1e", 2.0, 100)
-        val DEFAULT_HIGHLIGHTER = PenConfig("#ffd43b", 8.0, 40)
-
         fun readFrom(scene: ExcalidrawScene): NoteMeta {
             val d = scene.appData
             val pages = d["pages"] as? JsonObject
             val hasFrames = scene.elements.any { it.type == "frame" && !it.isDeleted && it.pageNumber != null }
+            val pens = HashMap<String, PenConfig>()
+            (d["pens"] as? JsonObject)?.forEach { (k, v) -> pens[k] = PenConfig.fromJson(v as? JsonObject, PenProfiles.byId(k).default) }
+            // v1 files
+            (d["pen"] as? JsonObject)?.let { pens.putIfAbsent("pen", PenConfig.fromJson(it, PenProfiles.byId("pen").default)) }
+            (d["highlighter"] as? JsonObject)?.let { pens.putIfAbsent("highlighter", PenConfig.fromJson(it, PenProfiles.highlighter.default)) }
             // A file never touched by this app: take the pen from Excalidraw's own appState if present.
-            val st = scene.appState
-            val excalidrawPen = PenConfig(
-                (st["currentItemStrokeColor"] as? JsonPrimitive)?.content ?: DEFAULT_PEN.color,
-                (st["currentItemStrokeWidth"] as? JsonPrimitive)?.doubleOrNull ?: DEFAULT_PEN.strokeWidth,
-                100,
-            )
+            if ("pen" !in pens) {
+                val st = scene.appState
+                (st["currentItemStrokeColor"] as? JsonPrimitive)?.content?.let { c ->
+                    pens["pen"] = PenConfig(c, (st["currentItemStrokeWidth"] as? JsonPrimitive)?.doubleOrNull ?: 1.5, 100)
+                }
+            }
             return NoteMeta(
                 tool = (d["tool"] as? JsonPrimitive)?.content?.takeIf { it in setOf("pen", "highlighter", "eraser", "select") } ?: "pen",
-                pen = PenConfig.fromJson(d["pen"] as? JsonObject, excalidrawPen),
-                highlighter = PenConfig.fromJson(d["highlighter"] as? JsonObject, DEFAULT_HIGHLIGHTER),
+                profile = (d["profile"] as? JsonPrimitive)?.content?.takeIf { id -> PenProfiles.all.any { it.id == id } } ?: "pen",
+                pens = pens,
                 paged = (pages?.get("enabled") as? JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: hasFrames,
                 direction = if ((pages?.get("direction") as? JsonPrimitive)?.content == "horizontal") PageDirection.HORIZONTAL else PageDirection.VERTICAL,
                 orientation = if ((pages?.get("orientation") as? JsonPrimitive)?.content == "landscape") PageOrientation.LANDSCAPE else PageOrientation.PORTRAIT,

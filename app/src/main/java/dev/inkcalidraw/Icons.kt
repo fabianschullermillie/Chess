@@ -9,7 +9,7 @@ import android.graphics.RectF
 import android.graphics.drawable.Drawable
 
 /** Line icons drawn in a 24×24 grid (stroke 1.8), so they scale crisply and follow the theme colour. */
-enum class Icon { BACK, PEN, HIGHLIGHTER, ERASER, LASSO, IMAGE, PDF, UNDO, REDO, FIT, MORE, PLUS, PREV, NEXT, PASTE, PAGES, TRASH, COPY, CHECK, FOLDER, IMPORT, EXPORT, MOON, WIDTH }
+enum class Icon { BACK, PEN, HIGHLIGHTER, ERASER, LASSO, IMAGE, PDF, UNDO, REDO, FIT, MORE, PLUS, PREV, NEXT, PASTE, PAGES, TRASH, COPY, CHECK, FOLDER, IMPORT, EXPORT, MOON, WIDTH, FULLSCREEN, FULLSCREEN_EXIT, FOLDER_PLUS, MOVE }
 
 class IconDrawable(private val icon: Icon, color: Int) : Drawable() {
     private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -92,6 +92,19 @@ class IconDrawable(private val icon: Icon, color: Int) : Drawable() {
             Icon.IMPORT -> { P.moveTo(12f, 4f); P.lineTo(12f, 15f); P.moveTo(7.5f, 10.5f); P.lineTo(12f, 15f); P.lineTo(16.5f, 10.5f); P.moveTo(4.5f, 15f); P.lineTo(4.5f, 20f); P.lineTo(19.5f, 20f); P.lineTo(19.5f, 15f) }
             Icon.EXPORT -> { P.moveTo(12f, 15f); P.lineTo(12f, 4f); P.moveTo(7.5f, 8.5f); P.lineTo(12f, 4f); P.lineTo(16.5f, 8.5f); P.moveTo(4.5f, 15f); P.lineTo(4.5f, 20f); P.lineTo(19.5f, 20f); P.lineTo(19.5f, 15f) }
             Icon.MOON -> { P.moveTo(19.5f, 14.5f); P.cubicTo(15f, 17f, 8f, 14f, 9.5f, 4.5f); P.cubicTo(5.5f, 6f, 3.8f, 10.5f, 5.5f, 14.5f); P.cubicTo(7.5f, 19.5f, 15.5f, 21f, 19.5f, 14.5f); P.close() }
+            Icon.FULLSCREEN -> {
+                P.moveTo(4f, 9f); P.lineTo(4f, 4f); P.lineTo(9f, 4f); P.moveTo(15f, 4f); P.lineTo(20f, 4f); P.lineTo(20f, 9f)
+                P.moveTo(20f, 15f); P.lineTo(20f, 20f); P.lineTo(15f, 20f); P.moveTo(9f, 20f); P.lineTo(4f, 20f); P.lineTo(4f, 15f)
+            }
+            Icon.FULLSCREEN_EXIT -> {
+                P.moveTo(9f, 4f); P.lineTo(9f, 9f); P.lineTo(4f, 9f); P.moveTo(15f, 4f); P.lineTo(15f, 9f); P.lineTo(20f, 9f)
+                P.moveTo(20f, 15f); P.lineTo(15f, 15f); P.lineTo(15f, 20f); P.moveTo(9f, 20f); P.lineTo(9f, 15f); P.lineTo(4f, 15f)
+            }
+            Icon.FOLDER_PLUS -> {
+                P.moveTo(3.5f, 18.5f); P.lineTo(3.5f, 5.5f); P.lineTo(9.5f, 5.5f); P.lineTo(11.5f, 8f); P.lineTo(20.5f, 8f); P.lineTo(20.5f, 18.5f); P.close()
+                P.moveTo(12f, 10.5f); P.lineTo(12f, 16f); P.moveTo(9.25f, 13.25f); P.lineTo(14.75f, 13.25f)
+            }
+            Icon.MOVE -> { P.moveTo(4f, 12f); P.lineTo(18f, 12f); P.moveTo(13.5f, 7.5f); P.lineTo(18f, 12f); P.lineTo(13.5f, 16.5f) }
             Icon.WIDTH -> {
                 p.strokeWidth = 1f; c.drawLine(4f, 6f, 20f, 6f, p)
                 p.strokeWidth = 2.2f; c.drawLine(4f, 12f, 20f, 12f, p)

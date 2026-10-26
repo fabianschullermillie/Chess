@@ -51,6 +51,12 @@ class EditorActivity : ComponentActivity() {
     private lateinit var menuAnchor: View
     private lateinit var colorDot: View
     private lateinit var recentRow: LinearLayout
+    private lateinit var topBar: View
+    private lateinit var topDivider: View
+    private lateinit var exitFullscreen: View
+    private lateinit var pdfs: PdfPages
+    private lateinit var folder: androidx.documentfile.provider.DocumentFile
+    private var fullscreen = false
     private val toolButtons = mutableMapOf<Tool, ImageView>()
 
     private var scene = ExcalidrawScene.empty()
@@ -112,7 +118,11 @@ class EditorActivity : ComponentActivity() {
         colors = ColorHistory(this)
         penOnly = getSharedPreferences("ui", 0).getBoolean("penOnly", true)
 
+        folder = store.folder(intent.getStringExtra(EXTRA_FOLDER)?.let(Uri::parse))
+        // PDFs annotated by this note live next to it (or in app storage for notes opened from elsewhere).
+        pdfs = PdfPages(this) { name -> store.findFile(folder, name) ?: java.io.File(filesDir, "pdfs/$name").takeIf { it.exists() }?.let(Uri::fromFile) }
         surface = CanvasSurface(this, ui)
+        pdfs.onReady = { surface.post { surface.requestRender() } }
         predictor = MotionEventPredictor.newInstance(surface)
         surface.setOnTouchListener { v, ev -> onTouch(v, ev); true }
         surface.setOnHoverListener { _, ev -> onHover(ev); false }
@@ -124,21 +134,28 @@ class EditorActivity : ComponentActivity() {
             addView(buildSelectionBar(), FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = ui.dpi(12) })
             addView(buildPageNav(), FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = ui.dpi(16) })
         }
+        topBar = buildTopBar()
+        topDivider = View(this).apply { setBackgroundColor(ui.divider) }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(ui.bar)
-            addView(buildToolbar(), LinearLayout.LayoutParams(-1, ui.dpi(56)))
+            addView(topBar, LinearLayout.LayoutParams(-1, ui.dpi(52)))
+            addView(topDivider, LinearLayout.LayoutParams(-1, ui.dpi(1)))
+            addView(buildDrawBar(), LinearLayout.LayoutParams(-1, ui.dpi(48)))
             addView(View(context).apply { setBackgroundColor(ui.divider) }, LinearLayout.LayoutParams(-1, ui.dpi(1)))
             addView(canvasLayer, LinearLayout.LayoutParams(-1, 0, 1f))
         }
-        root.setOnApplyWindowInsetsListener { v, insets ->
-            val b = insets.getInsets(WindowInsets.Type.systemBars()); v.setPadding(b.left, b.top, b.right, b.bottom); insets
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val b = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars() or androidx.core.view.WindowInsetsCompat.Type.displayCutout())
+            v.setPadding(b.left, b.top, b.right, b.bottom); insets
         }
         setContentView(root)
         window.statusBarColor = ui.bar
+        window.navigationBarColor = ui.bar
+        setFullscreen(getSharedPreferences("ui", 0).getBoolean("fullscreen", false))
         setupDragAndDrop(surface)
 
-        val uri = intent?.data ?: store.create().uri
+        val uri = intent?.data ?: store.create(folder).uri
         open(uri, intent.getStringExtra(EXTRA_NAME))
     }
 
@@ -150,7 +167,27 @@ class EditorActivity : ComponentActivity() {
         saveNow()
     }
 
-    override fun onDestroy() { surface.release(); super.onDestroy() }
+    override fun onDestroy() { surface.release(); pdfs.close(); super.onDestroy() }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && fullscreen) setFullscreen(true) // re-hide after dialogs/popups
+    }
+
+    /** Fullscreen hides Android's status/navigation bars and the upper (note) bar; swipe from an edge shows the system bars briefly. */
+    private fun setFullscreen(on: Boolean) {
+        fullscreen = on
+        getSharedPreferences("ui", 0).edit().putBoolean("fullscreen", on).apply()
+        val c = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+        androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, !on)
+        if (on) {
+            c.systemBarsBehavior = androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            c.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        } else c.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        topBar.visibility = if (on) View.GONE else View.VISIBLE
+        topDivider.visibility = topBar.visibility
+        exitFullscreen.visibility = if (on) View.VISIBLE else View.GONE
+    }
 
     // =============================================================== frame building
 
@@ -171,6 +208,8 @@ class EditorActivity : ComponentActivity() {
                 elements, { id -> (files[id]?.get("dataURL") as? JsonPrimitive)?.content }, scene.backgroundColor,
                 visible = if (surface.width > 0) visibleWorld().inflate(50.0) else null,
                 offsetIds = selected, dx = dragDx, dy = dragDy, paged = meta.paged, deskColor = ui.desk,
+                scale = scale(),
+                pageImage = { f, px -> pdfs.get(f.pdfFile!!, f.pdfPage ?: 0, f.width, f.height, px) },
             ),
             matrix = Matrix(view),
             lasso = if (g == G.LASSO) lasso.toList() else null,
@@ -251,6 +290,7 @@ class EditorActivity : ComponentActivity() {
         val erasing = tool == Tool.ERASER || ev.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER ||
             (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
         val show = erasing && ev.actionMasked != MotionEvent.ACTION_HOVER_EXIT
+        if (!show && eraserCursor == null) return // nothing to update: don't re-render the scene on every hover move
         eraserCursor = if (show) floatArrayOf(ev.x, ev.y, eraserRadiusPx()) else null
         redraw()
     }
@@ -299,7 +339,8 @@ class EditorActivity : ComponentActivity() {
 
     private fun pressureOf(ev: MotionEvent, idx: Int, h: Int): Float {
         val p = if (h < 0) ev.getPressure(idx) else ev.getHistoricalPressure(idx, h)
-        return if (ev.getToolType(idx) == MotionEvent.TOOL_TYPE_FINGER) 0.5f else p.coerceIn(0f, 1f)
+        // Constant-width profiles store 0.5 everywhere, which Excalidraw also renders at constant width.
+        return if (ev.getToolType(idx) == MotionEvent.TOOL_TYPE_FINGER || !activeProfile().pressure) 0.5f else p.coerceIn(0f, 1f)
     }
 
     private fun addSample(x: Float, y: Float, p: Float) {
@@ -310,7 +351,7 @@ class EditorActivity : ComponentActivity() {
     }
 
     private fun renderWet(predicted: MotionEvent?) {
-        val pen = meta.activePenFor(tool)
+        val pen = activePen()
         var arr = samples.copyOf(sampleCount * 3 + (predicted?.let { (it.historySize + 1) * 3 } ?: 0))
         var total = sampleCount
         if (predicted != null) {
@@ -326,6 +367,7 @@ class EditorActivity : ComponentActivity() {
         surface.renderWet(CanvasSurface.Wet(
             strokeCounter, arr, sampleCount, total,
             ui.sceneColor(SceneRenderer.parseColor(pen.color, Color.BLACK)), pen.strokeWidth, pen.opacity * 255 / 100, Matrix(view),
+            activeProfile().grain,
         ))
     }
 
@@ -381,11 +423,12 @@ class EditorActivity : ComponentActivity() {
 
     private fun commitStroke() {
         if (sampleCount == 0) { surface.cancelWet(); return }
-        val pen = meta.activePenFor(tool)
+        val pen = activePen()
         val pts = (0 until sampleCount).map { floatArrayOf(samples[it * 3], samples[it * 3 + 1], samples[it * 3 + 2]) }
         val frameId = if (meta.paged) Pages.pageAt(Pages.pages(scene), pts[0][0].toDouble(), pts[0][1].toDouble())?.id else null
         pushUndo()
-        scene.elements.add(ExcalidrawScene.newFreedraw(pts, pen.color, pen.strokeWidth, FractionalIndex.after(scene.lastIndex()), pen.opacity, frameId))
+        val brush = activeProfile().id.takeIf { it != "pen" }
+        scene.elements.add(ExcalidrawScene.newFreedraw(pts, pen.color, pen.strokeWidth, FractionalIndex.after(scene.lastIndex()), pen.opacity, frameId, brush))
         markDirty()
         surface.commitWet(buildFrame()) // scene with the new stroke replaces the wet ink atomically
     }
@@ -540,7 +583,7 @@ class EditorActivity : ComponentActivity() {
     private fun recolorSelection() {
         if (selected.isEmpty()) return
         pushUndo()
-        val c = meta.activePenFor(tool).color
+        val c = activePen().color
         for (i in scene.elements.indices) if (scene.elements[i].id in selected && scene.elements[i].type != "image") scene.elements[i] = scene.elements[i].withChanges("strokeColor" to JsonPrimitive(c))
         markDirty()
     }
@@ -673,7 +716,7 @@ class EditorActivity : ComponentActivity() {
     private fun fitWidth() {
         val p = Pages.pages(scene).getOrNull(currentPageIndex()) ?: return
         val vw = surface.width.toFloat()
-        val s = vw * 0.96f / p.w.toFloat()
+        val s = vw / p.w.toFloat()
         val centerWorldY = toWorld(0f, surface.height / 2f)[1]
         val m = Matrix().apply { setScale(s, s); postTranslate((vw - p.w.toFloat() * s) / 2 - p.x.toFloat() * s, surface.height / 2f - centerWorldY * s) }
         animateTo(m)
@@ -749,31 +792,40 @@ class EditorActivity : ComponentActivity() {
     }
 
     private fun insertPdf(uri: Uri) {
-        val progress = Toast.makeText(this, "Importing PDF…", Toast.LENGTH_LONG).apply { show() }
         val firstNew = Pages.pages(scene).size
-        pushUndo()
-        val target = scene
+        val name = queryName(uri) ?: "document.pdf"
+        toast("Adding PDF…")
         io.execute {
             try {
-                val n = PdfSupport.import(this, uri, target, meta.direction)
+                // Build the new pages on a copy so the UI thread's scene isn't touched concurrently.
+                val tmp = ExcalidrawScene(kotlinx.serialization.json.JsonObject(emptyMap()), scene.snapshot().toMutableList())
+                val before = tmp.elements.size
+                val n = PdfSupport.import(this, store, folder, uri, name, tmp, meta.direction)
+                val added = tmp.elements.drop(before)
                 runOnUiThread {
-                    progress.cancel()
+                    pushUndo()
+                    scene.elements.addAll(added)
                     meta = meta.copy(paged = true)
                     markDirty()
                     toast("Added $n page${if (n == 1) "" else "s"}")
                     main.post { goToPage(firstNew, keepScale = false) }
                 }
             } catch (e: Exception) {
-                runOnUiThread { progress.cancel(); toast("Couldn't import PDF: ${e.message}") }
+                runOnUiThread { toast("Couldn't import PDF: ${e.message}") }
             }
         }
     }
 
+    private fun queryName(u: Uri): String? = runCatching {
+        contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    }.getOrNull()
+
     private fun writePdf(uri: Uri) {
-        val snapshot = ExcalidrawScene.parse(scene.toJson())
+        val snapshot = scene.copyForSave()
+        toast("Exporting PDF…")
         io.execute {
             try {
-                contentResolver.openOutputStream(uri, "wt")!!.use { PdfSupport.export(snapshot, it) }
+                contentResolver.openOutputStream(uri, "wt")!!.use { PdfSupport.export(snapshot, pdfs, it) }
                 runOnUiThread { toast("PDF exported") }
             } catch (e: Exception) { runOnUiThread { toast("Export failed: ${e.message}") } }
         }
@@ -846,12 +898,21 @@ class EditorActivity : ComponentActivity() {
     private fun metaChanged() { dirty = true; main.removeCallbacks(autosave); main.postDelayed(autosave, 1500) }
 
     private fun open(uri: Uri, name: String?) {
+        titleView.text = name ?: NoteStore.displayName(uri.lastPathSegment?.substringAfterLast('/') ?: "Note")
+        io.execute {
+            val parsed = runCatching { ExcalidrawScene.parse(store.read(uri)) }
+            runOnUiThread {
+                parsed.onSuccess { loaded(uri, it) }.onFailure { toast("Couldn't open: ${it.message}"); finish() }
+            }
+        }
+    }
+
+    private fun loaded(uri: Uri, parsed: ExcalidrawScene) {
         try {
-            scene = ExcalidrawScene.parse(store.read(uri))
+            scene = parsed
             meta = NoteMeta.readFrom(scene)
             tool = Tool.entries.firstOrNull { it.key == meta.tool } ?: Tool.PEN
             noteUri = uri
-            titleView.text = name ?: NoteStore.displayName(uri.lastPathSegment?.substringAfterLast('/') ?: "Note")
             undo.clear(); redo.clear(); setSelection(emptySet())
             updateToolButtons(); updateColorViews()
             surface.post { if (meta.paged) goToPage(0, keepScale = false) else fitContentNow() }
@@ -867,12 +928,13 @@ class EditorActivity : ComponentActivity() {
         if (!dirty) return
         val uri = noteUri ?: return
         meta.copy(tool = tool.key).writeTo(scene)
-        val json = scene.toJson()
+        val copy = scene.copyForSave() // JSON encoding happens off the UI thread
         dirty = false
         io.execute {
+            val json = copy.toJson()
             try { store.write(uri, json) } catch (e: Exception) {
                 runCatching {
-                    val copy = store.create(titleView.text.toString(), json)
+                    val copy = store.create(store.root(), titleView.text.toString(), json)
                     runOnUiThread { noteUri = copy.uri; toast("Saved a copy to your notes") }
                 }
             }
@@ -881,13 +943,15 @@ class EditorActivity : ComponentActivity() {
 
     // =============================================================== toolbar & overlays
 
-    private fun iconButton(icon: Icon, desc: String, onClick: (ImageView) -> Unit) = ImageView(this).apply {
+    private fun iconButton(icon: Icon, desc: String, small: Boolean = false, onClick: (ImageView) -> Unit) = ImageView(this).apply {
         setImageDrawable(IconDrawable(icon, ui.text))
         contentDescription = desc
-        setPadding(ui.dpi(9), ui.dpi(9), ui.dpi(9), ui.dpi(9))
+        val pad = if (small) 8 else 9
+        setPadding(ui.dpi(pad), ui.dpi(pad), ui.dpi(pad), ui.dpi(pad))
         background = null
         setOnClickListener { onClick(this) }
-        layoutParams = LinearLayout.LayoutParams(ui.dpi(44), ui.dpi(44)).apply { marginEnd = ui.dpi(2) }
+        val size = if (small) 40 else 44
+        layoutParams = LinearLayout.LayoutParams(ui.dpi(size), ui.dpi(size)).apply { marginEnd = ui.dpi(2) }
     }
 
     private fun separator() = View(this).apply {
@@ -907,11 +971,19 @@ class EditorActivity : ComponentActivity() {
 
     private fun penTool() = if (tool == Tool.HIGHLIGHTER) Tool.HIGHLIGHTER else Tool.PEN
 
-    private fun NoteMeta.activePenFor(t: Tool) = if (t == Tool.HIGHLIGHTER) highlighter else pen
+    private fun activeProfile(): PenProfile = if (tool == Tool.HIGHLIGHTER) PenProfiles.highlighter else PenProfiles.byId(meta.profile)
+    private fun activePen(): PenConfig = meta.penFor(activeProfile().id)
 
     private fun setPen(update: (PenConfig) -> PenConfig) {
-        meta = if (penTool() == Tool.HIGHLIGHTER) meta.copy(highlighter = update(meta.highlighter)) else meta.copy(pen = update(meta.pen))
         if (tool != Tool.PEN && tool != Tool.HIGHLIGHTER) { tool = Tool.PEN; updateToolButtons() }
+        val id = activeProfile().id
+        meta = meta.withPen(id, update(meta.penFor(id)))
+        updateColorViews(); metaChanged()
+    }
+
+    private fun setProfile(id: String) {
+        meta = meta.copy(profile = id)
+        selectTool(Tool.PEN)
         updateColorViews(); metaChanged()
     }
 
@@ -922,7 +994,7 @@ class EditorActivity : ComponentActivity() {
 
     private fun updateColorViews() {
         if (!::colorDot.isInitialized) return
-        val pen = meta.activePenFor(penTool())
+        val pen = activePen()
         colorDot.background = android.graphics.drawable.GradientDrawable().apply {
             shape = android.graphics.drawable.GradientDrawable.OVAL
             setColor(ui.sceneColor(SceneRenderer.parseColor(pen.color, Color.BLACK)))
@@ -941,53 +1013,89 @@ class EditorActivity : ComponentActivity() {
         }
     }
 
-    private fun buildToolbar(): View {
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(ui.dpi(4), 0, ui.dpi(8), 0)
-            setBackgroundColor(ui.bar)
-        }
-        bar.addView(iconButton(Icon.BACK, "Back to notes") { finish() })
-        titleView = TextView(this).apply { textSize = 16f; setTextColor(ui.text); maxLines = 1; maxWidth = ui.dpi(220); setPadding(ui.dpi(2), 0, ui.dpi(8), 0) }
-        bar.addView(titleView)
-        bar.addView(separator())
+    private fun barRow(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        setPadding(ui.dpi(4), 0, ui.dpi(8), 0); setBackgroundColor(ui.bar)
+    }
 
+    private fun scrollable(row: LinearLayout) = HorizontalScrollView(this).apply {
+        isHorizontalScrollBarEnabled = false; setBackgroundColor(ui.bar); isFillViewport = true
+        addView(row, ViewGroup.LayoutParams(-2, -1))
+    }
+
+    /** Upper bar: the note itself (name, pages, view, export). Hidden in fullscreen. */
+    private fun buildTopBar(): View {
+        val bar = barRow()
+        bar.addView(iconButton(Icon.BACK, "Back to notes") { finish() })
+        titleView = TextView(this).apply {
+            textSize = 17f; setTextColor(ui.text); maxLines = 1; setPadding(ui.dpi(2), 0, ui.dpi(12), 0)
+            setOnClickListener { renameNote() }
+        }
+        bar.addView(titleView, LinearLayout.LayoutParams(0, -2, 1f))
+        bar.addView(iconButton(Icon.PAGES, "Add page") { if (!meta.paged) meta = meta.copy(paged = true); addPage(goTo = true) })
+        bar.addView(iconButton(Icon.FIT, "Fit") { showFitMenu(it) })
+        bar.addView(iconButton(Icon.PDF, "Insert PDF") { pickPdf.launch(arrayOf("application/pdf")) })
+        bar.addView(iconButton(Icon.EXPORT, "Export as PDF") { exportPdf.launch(titleView.text.toString() + ".pdf") })
+        bar.addView(iconButton(Icon.FULLSCREEN, "Fullscreen") { setFullscreen(true) })
+        bar.addView(iconButton(Icon.MORE, "More") { showMoreMenu(it) })
+        return bar
+    }
+
+    /** Lower, compact bar: everything for drawing. Stays visible in fullscreen. */
+    private fun buildDrawBar(): View {
+        val bar = barRow()
         for ((t, icon, label) in listOf(Triple(Tool.PEN, Icon.PEN, "Pen"), Triple(Tool.HIGHLIGHTER, Icon.HIGHLIGHTER, "Highlighter"), Triple(Tool.ERASER, Icon.ERASER, "Eraser"), Triple(Tool.SELECT, Icon.LASSO, "Lasso select"))) {
-            val b = iconButton(icon, label) {
-                if (tool == t && (t == Tool.PEN || t == Tool.HIGHLIGHTER)) showWidths(it) else selectTool(t)
+            val b = iconButton(icon, label, small = true) {
+                when {
+                    t == Tool.PEN && tool == Tool.PEN -> showProfiles(it)
+                    t == Tool.HIGHLIGHTER && tool == Tool.HIGHLIGHTER -> showWidths(it)
+                    else -> selectTool(t)
+                }
             }
+            if (t == Tool.PEN) b.setOnLongClickListener { showProfiles(it); true }
             toolButtons[t] = b; bar.addView(b)
         }
         bar.addView(separator())
-
         colorDot = View(this).apply {
             contentDescription = "Color"
-            setOnClickListener { v -> showColorPopup(v, ui, meta.activePenFor(penTool()).color, colors.list()) { useColor(it) } }
+            setOnClickListener { v -> showColorPopup(v, ui, activePen().color, colors.list()) { useColor(it) } }
         }
-        bar.addView(colorDot, LinearLayout.LayoutParams(ui.dpi(30), ui.dpi(30)).apply { setMargins(ui.dpi(6), 0, ui.dpi(4), 0) })
+        bar.addView(colorDot, LinearLayout.LayoutParams(ui.dpi(28), ui.dpi(28)).apply { setMargins(ui.dpi(6), 0, ui.dpi(4), 0) })
         recentRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
         bar.addView(recentRow)
-        bar.addView(iconButton(Icon.WIDTH, "Thickness") { showWidths(it) })
+        bar.addView(iconButton(Icon.WIDTH, "Thickness", small = true) { showWidths(it) })
         bar.addView(separator())
-
-        bar.addView(iconButton(Icon.PASTE, "Paste image") { pasteFromClipboard() })
-        bar.addView(iconButton(Icon.PDF, "Insert PDF") { pickPdf.launch(arrayOf("application/pdf")) })
-        bar.addView(separator())
-        bar.addView(iconButton(Icon.UNDO, "Undo") { doUndo() })
-        bar.addView(iconButton(Icon.REDO, "Redo") { doRedo() })
-        bar.addView(iconButton(Icon.FIT, "Fit") { showFitMenu(it) })
-        bar.addView(iconButton(Icon.MORE, "More") { showMoreMenu(it) })
+        bar.addView(iconButton(Icon.PASTE, "Paste image", small = true) { pasteFromClipboard() })
+        bar.addView(iconButton(Icon.UNDO, "Undo", small = true) { doUndo() })
+        bar.addView(iconButton(Icon.REDO, "Redo", small = true) { doRedo() })
+        bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+        exitFullscreen = iconButton(Icon.FULLSCREEN_EXIT, "Exit fullscreen", small = true) { setFullscreen(false) }
+        bar.addView(exitFullscreen)
         updateToolButtons(); updateColorViews()
-        return HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false; setBackgroundColor(ui.bar)
-            addView(bar, ViewGroup.LayoutParams(-2, -1))
-        }
+        return scrollable(bar)
+    }
+
+    private fun renameNote() {
+        val uri = noteUri ?: return
+        val input = android.widget.EditText(this).apply { setText(titleView.text); selectAll() }
+        android.app.AlertDialog.Builder(this).setTitle("Rename note").setView(input)
+            .setPositiveButton("Rename") { _, _ ->
+                saveNow()
+                val newName = input.text.toString()
+                io.execute {
+                    val nu = runCatching { store.rename(uri, folder, newName) }.getOrNull()
+                    runOnUiThread { if (nu != null) { noteUri = nu; titleView.text = newName.trim() } else toast("Rename failed") }
+                }
+            }.setNegativeButton("Cancel", null).show()
     }
 
     private fun showWidths(anchor: View) {
-        val pen = meta.activePenFor(penTool())
-        val widths = if (penTool() == Tool.HIGHLIGHTER) listOf(4.0, 6.0, 8.0, 12.0, 16.0, 24.0) else listOf(0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
-        showThicknessPopup(anchor, ui, widths, pen.strokeWidth, pen.color, pen.opacity) { w -> setPen { it.copy(strokeWidth = w) } }
+        val pen = activePen(); val prof = activeProfile()
+        showThicknessPopup(anchor, ui, prof.widths, pen.strokeWidth, pen.color, pen.opacity, prof.grain) { w -> setPen { it.copy(strokeWidth = w) } }
+    }
+
+    private fun showProfiles(anchor: View) {
+        showProfilePopup(anchor, ui, PenProfiles.all, meta.profile, { meta.penFor(it) }) { setProfile(it) }
     }
 
     private fun showFitMenu(anchor: View) {
@@ -1016,6 +1124,7 @@ class EditorActivity : ComponentActivity() {
                 menu.add(if (meta.direction == PageDirection.VERTICAL) "Scroll pages horizontally" else "Scroll pages vertically")
                 menu.add(if (meta.orientation == PageOrientation.PORTRAIT) "New pages: landscape" else "New pages: portrait")
             } else menu.add("Add A4 pages to this note")
+            menu.add(if (fullscreen) "Exit fullscreen" else "Fullscreen")
             menu.add("Insert PDF…")
             menu.add("Export as PDF…")
             setOnMenuItemClickListener {
@@ -1031,6 +1140,8 @@ class EditorActivity : ComponentActivity() {
                     t == "Scroll pages vertically" -> setDirection(PageDirection.VERTICAL)
                     t == "New pages: landscape" -> { meta = meta.copy(orientation = PageOrientation.LANDSCAPE); metaChanged() }
                     t == "New pages: portrait" -> { meta = meta.copy(orientation = PageOrientation.PORTRAIT); metaChanged() }
+                    t == "Fullscreen" -> setFullscreen(true)
+                    t == "Exit fullscreen" -> setFullscreen(false)
                     t == "Insert PDF…" -> pickPdf.launch(arrayOf("application/pdf"))
                     t == "Export as PDF…" -> exportPdf.launch(titleView.text.toString() + ".pdf")
                     else -> return@setOnMenuItemClickListener false
@@ -1079,5 +1190,5 @@ class EditorActivity : ComponentActivity() {
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
-    companion object { const val EXTRA_NAME = "name" }
+    companion object { const val EXTRA_NAME = "name"; const val EXTRA_FOLDER = "folder" }
 }

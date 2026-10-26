@@ -56,10 +56,12 @@ class EditorDeviceTest {
 
     // ------------------------------------------------------------------ helpers
 
-    private fun note(json: String, name: String): Uri = NoteStore(ctx).create(name, json).uri
+    private val store get() = NoteStore(ctx)
+
+    private fun note(json: String, name: String): Uri = store.create(store.root(), name, json).uri
 
     private fun launch(uri: Uri): ActivityScenario<EditorActivity> {
-        val s = ActivityScenario.launch<EditorActivity>(Intent(ctx, EditorActivity::class.java).setData(uri))
+        val s = ActivityScenario.launch<EditorActivity>(Intent(ctx, EditorActivity::class.java).setData(uri).putExtra(EditorActivity.EXTRA_FOLDER, store.root().uri.toString()))
         SystemClock.sleep(1500)
         return s
     }
@@ -246,7 +248,7 @@ class EditorDeviceTest {
             writeTo(pdf.outputStream()); close()
         }
         val scene = ExcalidrawScene.empty()
-        val n = PdfSupport.import(ctx, Uri.fromFile(pdf), scene, PageDirection.VERTICAL)
+        val n = PdfSupport.import(ctx, store, store.root(), Uri.fromFile(pdf), "lecture.pdf", scene, PageDirection.VERTICAL)
         NoteMeta(paged = true).writeTo(scene)
         assertEquals(3, n)
         val s = launch(note(scene.toJson(), "lecture"))
@@ -259,7 +261,9 @@ class EditorDeviceTest {
         assertNotNull("annotation bound to a page", sc.elements.last { it.type == "freedraw" }.frameId)
 
         val out = File(ctx.cacheDir, "export.pdf")
-        out.outputStream().use { PdfSupport.export(sc, it) }
+        val pdfs = PdfPages(ctx) { name -> store.findFile(store.root(), name) }
+        out.outputStream().use { PdfSupport.export(sc, pdfs, it) }
+        pdfs.close()
         PdfRenderer(ParcelFileDescriptor.open(out, ParcelFileDescriptor.MODE_READ_ONLY)).use { assertEquals(3, it.pageCount) }
         log("pdf: imported=$n exportedBytes=${out.length()}")
         s.close()
@@ -271,17 +275,68 @@ class EditorDeviceTest {
         Ui.setThemeSetting(ctx, "light")
     }
 
+    /** A 300-page PDF must import and open quickly (pages are rendered on demand, not copied into the note). */
+    @Test fun largePdfImportsFast() {
+        val pdf = File(ctx.cacheDir, "big.pdf")
+        PdfDocument().apply {
+            val paint = Paint().apply { textSize = 28f }
+            for (i in 1..300) { val p = startPage(PdfDocument.PageInfo.Builder(595, 842, i).create()); p.canvas.drawText("Page $i", 60f, 100f, paint); finishPage(p) }
+            writeTo(pdf.outputStream()); close()
+        }
+        val t0 = SystemClock.uptimeMillis()
+        val scene = ExcalidrawScene.empty()
+        val n = PdfSupport.import(ctx, store, store.root(), Uri.fromFile(pdf), "big.pdf", scene, PageDirection.VERTICAL)
+        NoteMeta(paged = true).writeTo(scene)
+        val json = scene.toJson()
+        val importMs = SystemClock.uptimeMillis() - t0
+        val t1 = SystemClock.uptimeMillis()
+        val s = launch(note(json, "big"))
+        val openMs = SystemClock.uptimeMillis() - t1 - 1500 // minus launch()'s fixed wait
+        shot("12-big-pdf")
+        log("big pdf: pages=$n import=${importMs}ms noteSize=${json.length / 1024}KB open≈${openMs}ms")
+        assertEquals(300, n)
+        assertTrue("note stays small (${json.length} chars)", json.length < 400_000)
+        assertTrue("import took $importMs ms", importMs < 15_000)
+        s.close()
+    }
+
+    /** Eraser on a busy page: time spent handling a fast erase gesture. */
+    @Test fun eraserStaysFastOnBusyNotes() {
+        val scene = ExcalidrawScene.empty()
+        for (i in 0 until 1500) {
+            val ox = (i % 30) * 70f; val oy = (i / 30) * 60f
+            scene.elements.add(ExcalidrawScene.newFreedraw((0 until 120).map { k -> floatArrayOf(ox + k * 0.5f, oy + 15 * sin(k / 8.0).toFloat(), .5f) }, "#1e1e1e", 1.5, FractionalIndex.after(scene.lastIndex())))
+        }
+        val s = launch(note(scene.toJson(), "busy"))
+        SystemClock.sleep(1500)
+        val r = surfaceRect(s)
+        val pts = (0 until 120).map { i -> floatArrayOf(r.left + r.width() * (0.1f + 0.8f * i / 119f), r.top + r.height() * (0.3f + 0.4f * sin(i / 10.0).toFloat()), .5f) }
+        val t0 = SystemClock.uptimeMillis()
+        gesture(pts, buttons = MotionEvent.BUTTON_STYLUS_PRIMARY, stepMs = 0)
+        val ms = SystemClock.uptimeMillis() - t0
+        SystemClock.sleep(500)
+        shot("13-busy-erase")
+        val left = live(s, "freedraw")
+        log("busy erase: 120 events in ${ms}ms (${"%.1f".format(ms / 120.0)}ms/event), erased ${1500 - left} strokes")
+        assertTrue("erased something", left < 1500)
+        assertTrue("eraser event handling too slow: $ms ms for 120 events", ms < 120 * 16)
+        s.close()
+    }
+
     /** Overview screenshots of the toolbar and its submenus. */
     @Test fun toolbarAndSubmenus() {
         val s = launch(note(Pages.newPagedScene(PageOrientation.LANDSCAPE, PageDirection.HORIZONTAL).toJson(), "toolbar"))
         val r = surfaceRect(s)
         gesture(wave(r, r.exactCenterY()))
         shot("08-toolbar")
-        device.findObject(By.desc("Color")).click(); SystemClock.sleep(500); shot("09-color-popup"); device.pressBack()
+        device.findObject(By.desc("Color")).click(); device.wait(Until.hasObject(By.text("Palette")), 3000); shot("09-color-popup"); device.pressBack()
         device.findObject(By.desc("Thickness")).click(); SystemClock.sleep(500); shot("10-thickness-popup"); device.pressBack()
         device.findObject(By.desc("Add page")).click(); SystemClock.sleep(800)
         assertEquals(2, Pages.pages(scene(s)).size)
         shot("11-second-page")
+        device.findObject(By.desc("Pen")).click(); SystemClock.sleep(500); shot("14-pen-types"); device.pressBack()
+        device.findObject(By.desc("Fullscreen")).click(); SystemClock.sleep(800); shot("15-fullscreen")
+        device.findObject(By.desc("Exit fullscreen")).click(); SystemClock.sleep(500)
         s.close()
     }
 }
