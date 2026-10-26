@@ -76,6 +76,7 @@ class SceneRenderer(private val dark: Boolean = false, private val syncImages: B
             } else {
                 fill.color = bg; fill.alpha = 255
                 c.drawRect(r, fill)
+                if (f.pdfFile == null) drawPaper(c, r, f.backgroundKind)
             }
         }
         val frames = HashMap<String, RectF>()
@@ -99,6 +100,26 @@ class SceneRenderer(private val dark: Boolean = false, private val syncImages: B
             c.drawRect(frames[el.id]!!, stroke)
             text.color = color(Color.parseColor("#999999")); text.textSize = 14f
             c.drawText(el.name ?: "Frame", el.x.toFloat(), el.y.toFloat() - 6f, text)
+        }
+    }
+
+    private val paper = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 1f }
+
+    /** App-only paper patterns (Excalidraw shows these pages as plain frames). 8 mm grid on A4. */
+    private fun drawPaper(c: Canvas, r: RectF, kind: String) {
+        if (kind == "blank") return
+        val step = 30.2f // 8 mm at 96 dpi
+        paper.color = color(Color.parseColor("#c9d3e0")); paper.style = Paint.Style.STROKE
+        when (kind) {
+            "lined" -> { var y = r.top + step * 3; while (y < r.bottom - step) { c.drawLine(r.left + step, y, r.right - step, y, paper); y += step } }
+            "grid" -> {
+                var x = r.left + step; while (x < r.right) { c.drawLine(x, r.top, x, r.bottom, paper); x += step }
+                var y = r.top + step; while (y < r.bottom) { c.drawLine(r.left, y, r.right, y, paper); y += step }
+            }
+            "dotted" -> {
+                paper.style = Paint.Style.FILL
+                var y = r.top + step; while (y < r.bottom) { var x = r.left + step; while (x < r.right) { c.drawCircle(x, y, 1.3f, paper); x += step }; y += step }
+            }
         }
     }
 

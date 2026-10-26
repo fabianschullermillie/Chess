@@ -78,10 +78,25 @@ class Element(val json: JsonObject) {
 
     /** Our page frames carry customData.inkcalidrawPage = page number. */
     val pageNumber: Int? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("inkcalidrawPage") as? JsonPrimitive)?.intOrNull }
-    /** PDF-backed pages: customData.pdfPage = 0-based page in the note's PDF. */
-    val pdfPage: Int? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("pdfPage") as? JsonPrimitive)?.intOrNull }
+    /**
+     * What a page frame shows underneath the ink: customData.background =
+     * {"kind": "pdf", "file": "Lecture.pdf", "page": 3} | {"kind": "blank" | "lined" | "grid" | "dotted"}.
+     * The pointer is independent of the page's position in the note, so pages can be inserted,
+     * reordered or deleted without touching which PDF page any other page shows.
+     */
+    val background: JsonObject? get() = customData?.get("background") as? JsonObject
+    val backgroundKind: String by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        (background?.get("kind") as? JsonPrimitive)?.content ?: if (customData?.get("pdfFile") != null) "pdf" else "blank"
+    }
+    /** PDF-backed pages: 0-based page in [pdfFile]. (Also reads the older pdfFile/pdfPage keys.) */
+    val pdfPage: Int? by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        if (backgroundKind != "pdf") null
+        else ((background?.get("page") ?: customData?.get("pdfPage")) as? JsonPrimitive)?.intOrNull ?: 0
+    }
     /** PDF-backed pages: customData.pdfFile = PDF file name next to the note. */
-    val pdfFile: String? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("pdfFile") as? JsonPrimitive)?.content }
+    val pdfFile: String? by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        if (backgroundKind != "pdf") null else ((background?.get("file") ?: customData?.get("pdfFile")) as? JsonPrimitive)?.content
+    }
     /** App brush (pen profile) used for a freedraw element; Excalidraw ignores it. */
     val brush: String? by lazy(LazyThreadSafetyMode.PUBLICATION) { (customData?.get("inkcalidrawBrush") as? JsonPrimitive)?.content }
 
@@ -276,7 +291,7 @@ class ExcalidrawScene(
         }
 
         /** An Excalidraw frame, used as a page. Excalidraw clips elements whose frameId points at it. */
-        fun newFrame(name: String, x: Double, y: Double, width: Double, height: Double, index: String?, pageNumber: Int, pdfFile: String? = null, pdfPage: Int? = null): Element =
+        fun newFrame(name: String, x: Double, y: Double, width: Double, height: Double, index: String?, pageNumber: Int, pdfFile: String? = null, pdfPage: Int? = null, kind: String = "blank"): Element =
             Element(buildJsonObject {
                 put("id", randomId()); put("type", "frame")
                 put("x", x); put("y", y); put("width", width); put("height", height); put("angle", 0)
@@ -293,7 +308,9 @@ class ExcalidrawScene(
                 put("name", name)
                 put("customData", buildJsonObject {
                     put("inkcalidrawPage", pageNumber)
-                    if (pdfFile != null) { put("pdfFile", pdfFile); put("pdfPage", pdfPage ?: 0) }
+                    put("background", buildJsonObject {
+                        if (pdfFile != null) { put("kind", "pdf"); put("file", pdfFile); put("page", pdfPage ?: 0) } else put("kind", kind)
+                    })
                 })
             })
 

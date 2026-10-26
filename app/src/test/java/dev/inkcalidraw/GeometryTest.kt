@@ -45,3 +45,43 @@ class EraserPerfTest {
         assertTrue("eraser sweep too slow: $perSweepUs µs", perSweepUs < 2000)
     }
 }
+
+class PagesTest {
+    private fun pdfNote(n: Int): ExcalidrawScene {
+        val s = ExcalidrawScene.empty()
+        for (i in 0 until n) Pages.addPage(s, PageOrientation.PORTRAIT, PageDirection.VERTICAL, pdfFile = "lecture.pdf", pdfPage = i)
+        return s
+    }
+
+    @Test fun insertingIntoAPdfKeepsEveryPdfPointer() {
+        val s = pdfNote(4)
+        val p3 = Pages.pages(s)[2]
+        s.elements.add(ExcalidrawScene.newFreedraw(listOf(floatArrayOf(100f, (p3.y + 100).toFloat(), .5f), floatArrayOf(200f, (p3.y + 120).toFloat(), .5f)), "#000", 2.0, FractionalIndex.after(s.lastIndex()), frameId = p3.id))
+        val inserted = Pages.insertPage(s, 2, PageDirection.VERTICAL, paper = "lined")
+
+        val ps = Pages.pages(s)
+        assertEquals(listOf(1, 2, 3, 4, 5), ps.map { it.number })
+        val frames = ps.map { p -> s.elements.first { it.id == p.id } }
+        assertEquals(listOf(0, null, 1, 2, 3), frames.map { it.pdfPage })       // pointers unchanged, new page has none
+        assertEquals("lined", frames[1].backgroundKind)
+        assertEquals(inserted.id, frames[1].id)
+        // layout: contiguous, no overlaps, ink moved with its page
+        ps.zipWithNext().forEach { (a, b) -> assertEquals(a.y + a.h + Pages.GAP, b.y, 1e-9) }
+        val ink = s.elements.first { it.type == "freedraw" }
+        val newP3 = ps.first { it.id == p3.id }
+        assertEquals(newP3.y - p3.y, ink.y - (p3.y + 100), 1e-3)
+    }
+
+    @Test fun deleteDuplicateAndMove() {
+        val s = pdfNote(3)
+        val ids = Pages.pages(s).map { it.id }
+        Pages.duplicatePage(s, ids[0], PageDirection.VERTICAL)
+        assertEquals(listOf(0, 0, 1, 2), Pages.pages(s).map { p -> s.elements.first { it.id == p.id }.pdfPage })
+        Pages.deletePage(s, ids[1], PageDirection.VERTICAL)
+        assertEquals(listOf(0, 0, 2), Pages.pages(s).map { p -> s.elements.first { it.id == p.id }.pdfPage })
+        Pages.movePage(s, ids[2], -1, PageDirection.VERTICAL)
+        assertEquals(listOf(0, 2, 0), Pages.pages(s).map { p -> s.elements.first { it.id == p.id }.pdfPage })
+        assertEquals(listOf(1, 2, 3), Pages.pages(s).map { it.number })
+        assertEquals(listOf("Page 1", "Page 2", "Page 3"), Pages.pages(s).map { p -> s.elements.first { it.id == p.id }.name })
+    }
+}

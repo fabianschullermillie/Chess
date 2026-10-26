@@ -750,6 +750,54 @@ class EditorActivity : ComponentActivity() {
         if (goTo) goToPage(Pages.pages(scene).size - 1, keepScale = true) else redraw()
     }
 
+    /** Inserts a page so it becomes page [position] (1-based) and shows it. Works the same in PDF notes. */
+    private fun insertPage(position: Int, paper: String? = null) {
+        pushUndo()
+        val pages = Pages.pages(scene)
+        val currentPaper = pages.getOrNull(currentPageIndex())?.let { p -> scene.elements.first { it.id == p.id }.backgroundKind }?.takeIf { it in Pages.PAPERS } ?: "blank"
+        Pages.insertPage(scene, position, meta.direction, paper = paper ?: currentPaper)
+        if (!meta.paged) meta = meta.copy(paged = true)
+        markDirty()
+        goToPage(position - 1, keepScale = true)
+    }
+
+    private fun showPageMenu(anchor: View) {
+        val pages = Pages.pages(scene)
+        val i = currentPageIndex()
+        val page = pages.getOrNull(i) ?: return
+        val frame = scene.elements.first { it.id == page.id }
+        PopupMenu(this, anchor).apply {
+            menu.add("Insert page before")
+            menu.add("Insert page after")
+            menu.add("Duplicate page")
+            if (i > 0) menu.add("Move page earlier")
+            if (i < pages.size - 1) menu.add("Move page later")
+            val paper = menu.addSubMenu("Paper")
+            for (k in Pages.PAPERS) paper.add(2, 0, 0, k.replaceFirstChar { it.uppercase() }).apply { isCheckable = true; isChecked = frame.backgroundKind == k }
+            paper.setGroupCheckable(2, true, true)
+            menu.add("Fit page")
+            menu.add("Delete page")
+            setOnMenuItemClickListener {
+                when (val t = it.title.toString()) {
+                    "Insert page before" -> insertPage(i + 1)
+                    "Insert page after" -> insertPage(i + 2)
+                    "Duplicate page" -> { pushUndo(); Pages.duplicatePage(scene, page.id, meta.direction); markDirty(); goToPage(i + 1, true) }
+                    "Move page earlier" -> { pushUndo(); Pages.movePage(scene, page.id, -1, meta.direction); markDirty(); goToPage(i - 1, true) }
+                    "Move page later" -> { pushUndo(); Pages.movePage(scene, page.id, +1, meta.direction); markDirty(); goToPage(i + 1, true) }
+                    "Fit page" -> fitPage()
+                    "Delete page" -> android.app.AlertDialog.Builder(this@EditorActivity).setMessage("Delete page ${i + 1} and everything on it?")
+                        .setPositiveButton("Delete") { _, _ -> pushUndo(); Pages.deletePage(scene, page.id, meta.direction); markDirty(); goToPage((i - 1).coerceAtLeast(0), true) }
+                        .setNegativeButton("Cancel", null).show()
+                    else -> if (t.lowercase() in Pages.PAPERS) {
+                        if (frame.pdfFile != null) toast("This page shows a PDF page; insert a new page for paper")
+                        else { pushUndo(); Pages.setPaper(scene, page.id, t.lowercase()); markDirty() }
+                    }
+                }
+                true
+            }
+        }.show()
+    }
+
     private fun setDirection(d: PageDirection) {
         if (d == meta.direction) return
         pushUndo()
@@ -1192,11 +1240,12 @@ class EditorActivity : ComponentActivity() {
         pageNav.addView(iconButton(Icon.PREV, "Previous page") { goToPage(currentPageIndex() - 1, keepScale = true) })
         pageLabel = TextView(this).apply {
             textSize = 14f; setTextColor(ui.text); gravity = Gravity.CENTER; minWidth = ui.dpi(64)
-            setOnClickListener { fitPage() }
+            setOnClickListener { showPageMenu(it) }
         }
         pageNav.addView(pageLabel)
         pageNav.addView(iconButton(Icon.NEXT, "Next page") { goToPage(currentPageIndex() + 1, keepScale = true) })
-        pageNav.addView(iconButton(Icon.PLUS, "Add page") { addPage(goTo = true) })
+        pageNav.addView(iconButton(Icon.PLUS, "Add page") { insertPage(currentPageIndex() + 2) })
+        pageNav.addView(iconButton(Icon.MORE, "Page options") { showPageMenu(it) })
         return pageNav
     }
 
