@@ -4,8 +4,6 @@ import android.app.AlertDialog
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.text.format.DateUtils
@@ -16,6 +14,7 @@ import android.view.ViewGroup
 import android.view.WindowInsets
 import android.widget.BaseAdapter
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.GridView
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -24,10 +23,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.serialization.json.JsonPrimitive
 import java.util.concurrent.Executors
 
 /** Home screen: a grid of notes with thumbnails. */
 class NotesActivity : ComponentActivity() {
+    private lateinit var ui: Ui
     private lateinit var store: NoteStore
     private lateinit var grid: GridView
     private lateinit var folderLabel: TextView
@@ -38,63 +39,53 @@ class NotesActivity : ComponentActivity() {
     private val thumbs = LruCache<String, Bitmap>(64)
 
     private val pickFolder = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) runCatching { store.setFolder(uri); reload() }
-            .onFailure { toast("Couldn't use that folder: ${it.message}") }
+        if (uri != null) runCatching { store.setFolder(uri); reload() }.onFailure { toast("Couldn't use that folder: ${it.message}") }
     }
-    private val importDoc = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
-        var ok = 0
-        for (u in uris) runCatching {
-            val text = contentResolver.openInputStream(u)!!.bufferedReader().use { it.readText() }
-            ExcalidrawScene.parse(text) // validate
-            val name = u.lastPathSegment?.substringAfterLast('/')?.let { NoteStore.displayName(it) }
-            store.create(name, text); ok++
-        }
-        if (uris.isNotEmpty()) toast("Imported $ok of ${uris.size}")
-        reload()
-    }
+    private val importDocs = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris -> importAll(uris) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ui = Ui.of(this)
         store = NoteStore(this)
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(20), dp(12), dp(12), dp(12))
+            setPadding(ui.dpi(20), ui.dpi(12), ui.dpi(12), ui.dpi(12))
             addView(LinearLayout(context).apply {
                 orientation = LinearLayout.VERTICAL
-                addView(TextView(context).apply { text = "Notes"; textSize = 26f; setTextColor(Color.BLACK) })
-                folderLabel = TextView(context).apply { textSize = 13f; setTextColor(Color.GRAY) }
+                addView(TextView(context).apply { text = "Notes"; textSize = 26f; setTextColor(ui.text) })
+                folderLabel = TextView(context).apply { textSize = 13f; setTextColor(ui.subtext) }
                 addView(folderLabel)
             }, LinearLayout.LayoutParams(0, -2, 1f))
-            addView(pill("Folder") { chooseFolder() })
-            addView(pill("Import") { importDoc.launch(arrayOf("*/*")) })
-            addView(pill("+ New note", primary = true) { openNote(store.create()) })
+            addView(pill(Icon.MOON, "Theme") { chooseTheme() })
+            addView(pill(Icon.FOLDER, "Folder") { chooseFolder() })
+            addView(pill(Icon.IMPORT, "Import") { importDocs.launch(arrayOf("application/pdf", "application/json", "application/octet-stream", "*/*")) })
+            addView(pill(Icon.PLUS, "New", primary = true) { newNoteMenu(it) })
         }
         empty = TextView(this).apply {
-            text = "No notes yet.\nTap “+ New note” to start drawing."
-            gravity = Gravity.CENTER; textSize = 16f; setTextColor(Color.GRAY); visibility = View.GONE
+            text = "No notes yet.\nTap “New” for a whiteboard or A4 pages, or import a PDF to annotate."
+            gravity = Gravity.CENTER; textSize = 16f; setTextColor(ui.subtext); visibility = View.GONE
         }
         grid = GridView(this).apply {
-            columnWidth = dp(220); numColumns = GridView.AUTO_FIT
-            horizontalSpacing = dp(16); verticalSpacing = dp(16)
+            columnWidth = ui.dpi(220); numColumns = GridView.AUTO_FIT
+            horizontalSpacing = ui.dpi(16); verticalSpacing = ui.dpi(16)
             stretchMode = GridView.STRETCH_COLUMN_WIDTH
-            setPadding(dp(16), dp(4), dp(16), dp(16)); clipToPadding = false
+            setPadding(ui.dpi(16), ui.dpi(4), ui.dpi(16), ui.dpi(16)); clipToPadding = false
             adapter = Adapter()
             setOnItemClickListener { _, _, pos, _ -> openNote(notes[pos]) }
             setOnItemLongClickListener { _, v, pos, _ -> noteMenu(v, notes[pos]); true }
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#f4f4f6"))
+            setBackgroundColor(ui.bg)
             addView(header)
-            addView(android.widget.FrameLayout(context).apply {
-                addView(grid); addView(empty, android.widget.FrameLayout.LayoutParams(-1, -1))
-            }, LinearLayout.LayoutParams(-1, 0, 1f))
+            addView(FrameLayout(context).apply { addView(grid); addView(empty, FrameLayout.LayoutParams(-1, -1)) }, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         root.setOnApplyWindowInsetsListener { v, insets ->
             val b = insets.getInsets(WindowInsets.Type.systemBars()); v.setPadding(b.left, b.top, b.right, b.bottom); insets
         }
         setContentView(root)
+        window.statusBarColor = ui.bg
     }
 
     override fun onResume() { super.onResume(); reload() }
@@ -115,12 +106,71 @@ class NotesActivity : ComponentActivity() {
         startActivity(Intent(this, EditorActivity::class.java).setData(n.uri).putExtra(EditorActivity.EXTRA_NAME, n.name))
     }
 
+    private fun newNoteMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add("Whiteboard (infinite)")
+            menu.add("A4 pages · portrait")
+            menu.add("A4 pages · landscape")
+            menu.add("Annotate a PDF…")
+            setOnMenuItemClickListener {
+                when (it.title.toString()) {
+                    "Whiteboard (infinite)" -> openNote(store.create())
+                    "A4 pages · portrait" -> openNote(store.create(null, Pages.newPagedScene(PageOrientation.PORTRAIT, PageDirection.VERTICAL).toJson()))
+                    "A4 pages · landscape" -> openNote(store.create(null, Pages.newPagedScene(PageOrientation.LANDSCAPE, PageDirection.VERTICAL).toJson()))
+                    "Annotate a PDF…" -> importDocs.launch(arrayOf("application/pdf"))
+                }
+                true
+            }
+        }.show()
+    }
+
+    /** .excalidraw files are copied in; PDFs become new paged notes ready for annotation. */
+    private fun importAll(uris: List<Uri>) {
+        if (uris.isEmpty()) return
+        val progress = Toast.makeText(this, "Importing…", Toast.LENGTH_LONG).apply { show() }
+        io.execute {
+            var ok = 0
+            var lastPdf: NoteStore.Note? = null
+            for (u in uris) runCatching {
+                val name = queryName(u)?.let { NoteStore.displayName(it).removeSuffix(".pdf").removeSuffix(".PDF") }
+                if (contentResolver.getType(u) == "application/pdf" || name?.endsWith(".pdf", true) == true || queryName(u)?.endsWith(".pdf", true) == true) {
+                    val scene = ExcalidrawScene.empty()
+                    PdfSupport.import(this, u, scene, PageDirection.VERTICAL)
+                    NoteMeta(paged = true).writeTo(scene)
+                    lastPdf = store.create(name, scene.toJson())
+                } else {
+                    val text = contentResolver.openInputStream(u)!!.bufferedReader().use { it.readText() }
+                    ExcalidrawScene.parse(text) // validate
+                    store.create(name, text)
+                }
+                ok++
+            }
+            runOnUiThread {
+                progress.cancel()
+                toast("Imported $ok of ${uris.size}")
+                reload()
+                if (uris.size == 1) lastPdf?.let { openNote(it) }
+            }
+        }
+    }
+
+    private fun queryName(u: Uri): String? = runCatching {
+        contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    }.getOrNull() ?: u.lastPathSegment?.substringAfterLast('/')
+
+    private fun chooseTheme() {
+        val keys = listOf("system", "light", "dark")
+        AlertDialog.Builder(this).setTitle("Appearance")
+            .setSingleChoiceItems(arrayOf("Follow system", "Light", "Dark"), keys.indexOf(Ui.themeSetting(this))) { d, which ->
+                Ui.setThemeSetting(this, keys[which]); d.dismiss(); recreate()
+            }.show()
+    }
+
     private fun chooseFolder() {
         val items = arrayOf("Choose a folder… (e.g. your Obsidian vault)", "Use storage on this tablet")
         AlertDialog.Builder(this).setTitle("Where should notes live?\nNow: ${store.folderLabel()}")
-            .setItems(items) { _, which ->
-                if (which == 0) pickFolder.launch(store.folderUri) else { store.setFolder(null); reload() }
-            }.show()
+            .setItems(items) { _, which -> if (which == 0) pickFolder.launch(store.folderUri) else { store.setFolder(null); reload() } }
+            .show()
     }
 
     private fun noteMenu(anchor: View, n: NoteStore.Note) {
@@ -156,8 +206,6 @@ class NotesActivity : ComponentActivity() {
         }, "Share ${n.name}"))
     }
 
-    // ------------------------------------------------------------------ grid
-
     private inner class Adapter : BaseAdapter() {
         override fun getCount() = notes.size
         override fun getItem(position: Int) = notes[position]
@@ -166,18 +214,18 @@ class NotesActivity : ComponentActivity() {
             val n = notes[position]
             val card = (convertView as? LinearLayout) ?: LinearLayout(this@NotesActivity).apply {
                 orientation = LinearLayout.VERTICAL
-                background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(12).toFloat() }
-                elevation = dp(2).toFloat()
-                setPadding(dp(8), dp(8), dp(8), dp(10))
-                addView(ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER; tag = "img" }, LinearLayout.LayoutParams(-1, dp(150)))
-                addView(TextView(context).apply { textSize = 15f; setTextColor(Color.BLACK); maxLines = 1; tag = "name"; setPadding(dp(4), dp(8), dp(4), 0) })
-                addView(TextView(context).apply { textSize = 12f; setTextColor(Color.GRAY); tag = "date"; setPadding(dp(4), dp(2), dp(4), 0) })
+                background = ui.rounded(ui.surface, 12, ui.divider)
+                elevation = ui.dp(2)
+                setPadding(ui.dpi(8), ui.dpi(8), ui.dpi(8), ui.dpi(10))
+                addView(ImageView(context).apply { scaleType = ImageView.ScaleType.FIT_CENTER; tag = "img" }, LinearLayout.LayoutParams(-1, ui.dpi(150)))
+                addView(TextView(context).apply { textSize = 15f; setTextColor(ui.text); maxLines = 1; tag = "name"; setPadding(ui.dpi(4), ui.dpi(8), ui.dpi(4), 0) })
+                addView(TextView(context).apply { textSize = 12f; setTextColor(ui.subtext); tag = "date"; setPadding(ui.dpi(4), ui.dpi(2), ui.dpi(4), 0) })
             }
             card.findViewWithTag<TextView>("name").text = n.name
             card.findViewWithTag<TextView>("date").text = DateUtils.getRelativeTimeSpanString(n.lastModified)
             val img = card.findViewWithTag<ImageView>("img")
-            val key = "${n.uri}@${n.lastModified}"
-            img.tag = "img"; img.setTag(R.id.thumb_key, key)
+            val key = "${n.uri}@${n.lastModified}@${ui.dark}"
+            img.setTag(R.id.thumb_key, key)
             val cached = thumbs.get(key)
             img.setImageBitmap(cached)
             if (cached == null) io.execute {
@@ -191,34 +239,34 @@ class NotesActivity : ComponentActivity() {
 
     private fun thumbnail(json: String): Bitmap {
         val scene = ExcalidrawScene.parse(json)
+        val meta = NoteMeta.readFrom(scene)
         val w = 440; val h = 300
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
-        c.drawColor(SceneRenderer.parseColor(scene.backgroundColor, Color.WHITE))
-        val b = SceneRenderer.contentBounds(scene.elements) ?: return bmp
-        b.inset(-20f, -20f)
-        val s = minOf(w / b.width(), h / b.height(), 1.5f)
-        c.translate((w - b.width() * s) / 2, (h - b.height() * s) / 2)
-        c.scale(s, s); c.translate(-b.left, -b.top)
-        SceneRenderer().draw(c, scene)
+        // Paged notes: show the first page; whiteboards: everything.
+        val first = if (meta.paged) Pages.pages(scene).firstOrNull() else null
+        val b = first?.box ?: Geometry.contentBounds(scene.elements)?.inflate(20.0)
+        val r = SceneRenderer(dark = ui.dark, syncImages = true)
+        c.drawColor(if (meta.paged) ui.desk else r.color(SceneRenderer.parseColor(scene.backgroundColor, android.graphics.Color.WHITE)))
+        if (b == null) return bmp
+        val s = minOf(w / b.width, h / b.height, 1.5).toFloat()
+        c.translate((w - b.width.toFloat() * s) / 2, (h - b.height.toFloat() * s) / 2)
+        c.scale(s, s); c.translate(-b.minX.toFloat(), -b.minY.toFloat())
+        val files = scene.files
+        r.draw(c, SceneRenderer.Input(scene.elements, { id -> (files[id]?.get("dataURL") as? JsonPrimitive)?.content }, scene.backgroundColor, paged = meta.paged, deskColor = ui.desk))
         return bmp
     }
 
-    // ------------------------------------------------------------------ ui helpers
-
-    private fun pill(label: String, primary: Boolean = false, onClick: () -> Unit) = TextView(this).apply {
-        text = label; textSize = 15f
-        setTextColor(if (primary) Color.WHITE else Color.parseColor("#1e1e1e"))
-        background = GradientDrawable().apply {
-            cornerRadius = dp(20).toFloat()
-            setColor(if (primary) Color.parseColor("#6965db") else Color.parseColor("#e9e9f0"))
-        }
-        setPadding(dp(16), dp(9), dp(16), dp(9))
-        layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) }
-        setOnClickListener { onClick() }
+    private fun pill(icon: Icon, label: String, primary: Boolean = false, onClick: (View) -> Unit) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+        val fg = if (primary) android.graphics.Color.WHITE else ui.text
+        addView(ImageView(context).apply { setImageDrawable(IconDrawable(icon, fg)) }, LinearLayout.LayoutParams(ui.dpi(20), ui.dpi(20)))
+        addView(TextView(context).apply { text = label; textSize = 15f; setTextColor(fg); setPadding(ui.dpi(6), 0, 0, 0) })
+        background = ui.rounded(if (primary) ui.accent else ui.accentSoft, 20)
+        setPadding(ui.dpi(14), ui.dpi(8), ui.dpi(16), ui.dpi(8))
+        layoutParams = LinearLayout.LayoutParams(-2, -2).apply { marginStart = ui.dpi(8) }
+        setOnClickListener { onClick(it) }
     }
 
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
-
 }

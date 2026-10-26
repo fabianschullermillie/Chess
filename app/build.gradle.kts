@@ -11,6 +11,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionName = "0.2-prototype." + (System.getenv("GITHUB_RUN_NUMBER") ?: "local")
     }
     // Prototype-only key committed to the repo so every CI build installs over the previous one.
@@ -30,11 +31,7 @@ android {
 }
 kotlin { jvmToolchain(21); compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17) } }
 dependencies {
-    implementation("androidx.ink:ink-authoring:1.0.0")
-    implementation("androidx.ink:ink-brush:1.0.0")
-    implementation("androidx.ink:ink-strokes:1.0.0")
-    implementation("androidx.ink:ink-rendering:1.0.0")
-    implementation("androidx.ink:ink-geometry:1.0.0")
+    implementation("androidx.graphics:graphics-core:1.0.4")
     implementation("androidx.activity:activity-ktx:1.13.0")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.input:input-motionprediction:1.0.0")
@@ -42,5 +39,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test:rules:1.7.0")
+    androidTestImplementation("androidx.test:core-ktx:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }
 tasks.withType<Test>().configureEach { systemProperty("fixtureDir", rootProject.file("fixtures").absolutePath) }

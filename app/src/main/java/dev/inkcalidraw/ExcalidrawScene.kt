@@ -66,6 +66,13 @@ class Element(var json: JsonObject) {
     )
 
     val fileId: String? get() = json.str("fileId")
+    val frameId: String? get() = json.str("frameId")
+    val name: String? get() = json.str("name")
+    val locked: Boolean get() = json["locked"]?.jsonPrimitive?.booleanOrNull ?: false
+    val customData: JsonObject? get() = json["customData"] as? JsonObject
+
+    /** Our page frames carry customData.inkcalidrawPage = page number. */
+    val pageNumber: Int? get() = (customData?.get("inkcalidrawPage") as? JsonPrimitive)?.intOrNull
 
     /** Image flip, Excalidraw's `scale: [sx, sy]` (each 1 or -1). */
     val imageScale: Pair<Float, Float>
@@ -99,10 +106,25 @@ private fun JsonObject.str(k: String): String? = (this[k] as? JsonPrimitive)?.ta
 private fun JsonObject.num(k: String): Double = (this[k] as? JsonPrimitive)?.doubleOrNull ?: 0.0
 
 class ExcalidrawScene(
-    /** Every top-level key except "elements" (appState, files, source, ...), kept verbatim. */
-    private val rest: JsonObject,
+    rest: JsonObject,
     val elements: MutableList<Element>,
 ) {
+    /** Every top-level key except "elements" and "files" (appState, source, our "inkcalidraw" block, ...). */
+    val meta: MutableMap<String, JsonElement> = (rest - "files").toMutableMap()
+
+    var appState: JsonObject
+        get() = meta["appState"] as? JsonObject ?: buildJsonObject { put("gridSize", JsonNull); put("viewBackgroundColor", "#ffffff") }
+        set(v) { meta["appState"] = v }
+
+    fun setAppState(vararg kv: Pair<String, JsonElement>) {
+        appState = JsonObject(appState.toMutableMap().apply { kv.forEach { (k, v) -> put(k, v) } })
+    }
+
+    /** App-specific settings live in a top-level "inkcalidraw" object (ignored by Excalidraw). */
+    var appData: JsonObject
+        get() = meta[APP_KEY] as? JsonObject ?: JsonObject(emptyMap())
+        set(v) { meta[APP_KEY] = v }
+
     /** The scene's binary files (images), keyed by fileId, as stored in the file's top-level "files". */
     val files: MutableMap<String, JsonObject> =
         ((rest["files"] as? JsonObject)?.mapValues { it.value.jsonObject } ?: emptyMap()).toMutableMap()
@@ -119,20 +141,20 @@ class ExcalidrawScene(
     }
 
     val backgroundColor: String
-        get() = (rest["appState"] as? JsonObject)?.get("viewBackgroundColor")
-            ?.let { (it as? JsonPrimitive)?.content } ?: "#ffffff"
+        get() = (appState["viewBackgroundColor"] as? JsonPrimitive)?.content ?: "#ffffff"
+
+    /** Snapshot of the elements list safe to hand to another thread (elements themselves are immutable). */
+    fun snapshot(): List<Element> = elements.toList()
 
     fun toJson(): String {
         val out = buildJsonObject {
-            put("type", rest["type"] ?: JsonPrimitive("excalidraw"))
-            put("version", rest["version"] ?: JsonPrimitive(2))
-            put("source", rest["source"] ?: JsonPrimitive(SOURCE))
+            put("type", meta["type"] ?: JsonPrimitive("excalidraw"))
+            put("version", meta["version"] ?: JsonPrimitive(2))
+            put("source", meta["source"] ?: JsonPrimitive(SOURCE))
             put("elements", JsonArray(elements.map { it.json }))
-            put("appState", rest["appState"] ?: buildJsonObject {
-                put("gridSize", JsonNull); put("viewBackgroundColor", "#ffffff")
-            })
+            put("appState", appState)
             put("files", JsonObject(files))
-            for ((k, v) in rest) if (k !in setOf("type", "version", "source", "elements", "appState", "files")) put(k, v)
+            for ((k, v) in meta) if (k !in setOf("type", "version", "source", "elements", "appState", "files")) put(k, v)
         }
         return json.encodeToString(JsonObject.serializer(), out)
     }
@@ -141,6 +163,7 @@ class ExcalidrawScene(
 
     companion object {
         const val SOURCE = "https://github.com/inkcalidraw (android prototype)"
+        const val APP_KEY = "inkcalidraw"
         private val json = Json { prettyPrint = false }
 
         fun empty() = ExcalidrawScene(JsonObject(emptyMap()), mutableListOf())
@@ -161,9 +184,10 @@ class ExcalidrawScene(
         fun newFreedraw(
             samples: List<FloatArray>,
             strokeColor: String,
-            strokeWidth: Int,
+            strokeWidth: Double,
             index: String?,
             opacity: Int = 100,
+            frameId: String? = null,
         ): Element {
             require(samples.isNotEmpty())
             // Excalidraw discards freedraw elements with < 2 points on load; a tap in Excalidraw
@@ -185,12 +209,12 @@ class ExcalidrawScene(
                 put("strokeColor", strokeColor)
                 put("backgroundColor", "transparent")
                 put("fillStyle", "solid")
-                put("strokeWidth", strokeWidth)
+                put("strokeWidth", if (strokeWidth == strokeWidth.toInt().toDouble()) JsonPrimitive(strokeWidth.toInt()) else JsonPrimitive(strokeWidth))
                 put("strokeStyle", "solid")
                 put("roughness", 1)
                 put("opacity", opacity)
                 put("groupIds", JsonArray(emptyList()))
-                put("frameId", JsonNull)
+                put("frameId", frameId?.let { JsonPrimitive(it) } ?: JsonNull)
                 if (index != null) put("index", index)
                 put("roundness", JsonNull)
                 put("seed", Random.nextInt(1, Int.MAX_VALUE))
@@ -212,13 +236,34 @@ class ExcalidrawScene(
          * An Excalidraw image element. The bytes live in the scene's "files" map under [fileId];
          * the element only references them, exactly like Excalidraw does.
          */
-        fun newImage(fileId: String, x: Double, y: Double, width: Double, height: Double, index: String?): Element {
+        fun newImage(fileId: String, x: Double, y: Double, width: Double, height: Double, index: String?, frameId: String? = null, locked: Boolean = false): Element {
             return Element(buildJsonObject {
                 put("id", randomId()); put("type", "image")
                 put("x", x); put("y", y); put("width", width); put("height", height); put("angle", 0)
                 put("strokeColor", "transparent"); put("backgroundColor", "transparent")
                 put("fillStyle", "solid"); put("strokeWidth", 2); put("strokeStyle", "solid")
                 put("roughness", 1); put("opacity", 100)
+                put("groupIds", JsonArray(emptyList())); put("frameId", frameId?.let { JsonPrimitive(it) } ?: JsonNull)
+                if (index != null) put("index", index)
+                put("roundness", JsonNull)
+                put("seed", Random.nextInt(1, Int.MAX_VALUE)); put("version", 1)
+                put("versionNonce", Random.nextInt(1, Int.MAX_VALUE)); put("isDeleted", false)
+                put("boundElements", JsonNull); put("updated", System.currentTimeMillis())
+                put("link", JsonNull); put("locked", locked)
+                put("status", "saved"); put("fileId", fileId)
+                put("scale", buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(1)) })
+                put("crop", JsonNull)
+            })
+        }
+
+        /** An Excalidraw frame, used as a page. Excalidraw clips elements whose frameId points at it. */
+        fun newFrame(name: String, x: Double, y: Double, width: Double, height: Double, index: String?, pageNumber: Int): Element =
+            Element(buildJsonObject {
+                put("id", randomId()); put("type", "frame")
+                put("x", x); put("y", y); put("width", width); put("height", height); put("angle", 0)
+                put("strokeColor", "#bbb"); put("backgroundColor", "transparent")
+                put("fillStyle", "solid"); put("strokeWidth", 2); put("strokeStyle", "solid")
+                put("roughness", 0); put("opacity", 100)
                 put("groupIds", JsonArray(emptyList())); put("frameId", JsonNull)
                 if (index != null) put("index", index)
                 put("roundness", JsonNull)
@@ -226,11 +271,9 @@ class ExcalidrawScene(
                 put("versionNonce", Random.nextInt(1, Int.MAX_VALUE)); put("isDeleted", false)
                 put("boundElements", JsonNull); put("updated", System.currentTimeMillis())
                 put("link", JsonNull); put("locked", false)
-                put("status", "saved"); put("fileId", fileId)
-                put("scale", buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(1)) })
-                put("crop", JsonNull)
+                put("name", name)
+                put("customData", buildJsonObject { put("inkcalidrawPage", pageNumber) })
             })
-        }
 
         private const val ID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-"
         internal fun randomId() = (1..21).map { ID_CHARS[Random.nextInt(ID_CHARS.length)] }.joinToString("")

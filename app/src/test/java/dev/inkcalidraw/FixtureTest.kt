@@ -41,21 +41,21 @@ class FixtureTest {
     fun writeFixtures() {
         val scene = ExcalidrawScene.empty()
         var idx: String? = null
-        fun add(samples: List<FloatArray>, color: String, w: Int) {
+        fun add(samples: List<FloatArray>, color: String, w: Double) {
             idx = FractionalIndex.after(idx)
             scene.elements.add(ExcalidrawScene.newFreedraw(samples, color, w, idx))
         }
-        add(penStroke(40f, 80f, 1), "#1e1e1e", 1)
-        add(penStroke(40f, 220f, 2), "#e03131", 2)
-        add(penStroke(40f, 380f, 3, n = 300), "#1971c2", 4)
+        add(penStroke(40f, 80f, 1), "#1e1e1e", 1.0)
+        add(penStroke(40f, 220f, 2), "#e03131", 1.5)
+        add(penStroke(40f, 380f, 3, n = 300), "#1971c2", 4.0)
         // sharp zig-zag (exercises the sharp-corner branch)
         add(listOf(floatArrayOf(400f, 100f, .5f), floatArrayOf(480f, 180f, .6f), floatArrayOf(400f, 260f, .7f),
             floatArrayOf(480f, 340f, .6f), floatArrayOf(400f, 420f, .4f)).flatMap { listOf(it) }.let { base ->
             // densify like a real pen would
             base.zipWithNext().flatMap { (a, b) -> (0 until 20).map { k -> val t = k / 20f; floatArrayOf(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t) } } + listOf(base.last())
-        }, "#2f9e44", 2)
-        add(listOf(floatArrayOf(560f, 120f, 0.8f)), "#1e1e1e", 2)                                // a dot
-        add(listOf(floatArrayOf(560f, 200f, 0.3f), floatArrayOf(640f, 230f, 0.9f)), "#f08c00", 2) // 2-point stroke
+        }, "#2f9e44", 2.0)
+        add(listOf(floatArrayOf(560f, 120f, 0.8f)), "#1e1e1e", 2.0)                                // a dot
+        add(listOf(floatArrayOf(560f, 200f, 0.3f), floatArrayOf(640f, 230f, 0.9f)), "#f08c00", 2.0) // 2-point stroke
 
         // An element "created on excalidraw.com" with fields we don't model; must survive untouched.
         val foreign = buildJsonObject {
@@ -99,5 +99,38 @@ class FixtureTest {
         val keys = (0 until 300).map { k = FractionalIndex.after(k); k!! }
         File(out, "keys.json").writeText(keys.joinToString(",", "[", "]") { "\"$it\"" })
         assertTrue(keys.zipWithNext().all { (a, b) -> a < b })
+    }
+
+    /** An A4 note: page frames, strokes bound to pages, a locked "PDF page" image, and the pen config. */
+    @Test
+    fun writePagedFixture() {
+        val scene = Pages.newPagedScene(PageOrientation.PORTRAIT, PageDirection.VERTICAL)
+        val p2 = Pages.addPage(scene, PageOrientation.PORTRAIT, PageDirection.VERTICAL)
+        val p1 = Pages.pages(scene)[0]
+        assertEquals(Pages.A4_LONG + Pages.GAP, p2.y, 1e-9)
+
+        val bytes = javaClass.classLoader!!.getResourceAsStream("slide.png")!!.readBytes()
+        val fileId = java.security.MessageDigest.getInstance("SHA-1").digest(bytes).joinToString("") { "%02x".format(it) }
+        scene.addFile(fileId, "image/png", "data:image/png;base64," + java.util.Base64.getEncoder().encodeToString(bytes))
+        scene.elements.add(ExcalidrawScene.newImage(fileId, p1.x, p1.y, p1.w, p1.w * 140 / 240, FractionalIndex.after(scene.lastIndex()), frameId = p1.id, locked = true))
+        // a stroke that runs off the right edge of page 1 (Excalidraw clips it to the frame)
+        scene.elements.add(ExcalidrawScene.newFreedraw(penStroke(560f, 620f, 7), "#e03131", 2.0, FractionalIndex.after(scene.lastIndex()), frameId = p1.id))
+        scene.elements.add(ExcalidrawScene.newFreedraw(penStroke(120f, (p2.y + 200).toFloat(), 8), "#1971c2", 3.0, FractionalIndex.after(scene.lastIndex()), frameId = p2.id))
+        scene.elements.add(ExcalidrawScene.newFreedraw(penStroke(120f, (p2.y + 400).toFloat(), 9), "#ffd43b", 8.0, FractionalIndex.after(scene.lastIndex()), opacity = 40, frameId = p2.id))
+        NoteMeta(tool = "highlighter", pen = PenConfig("#2f9e44", 1.5, 100), highlighter = PenConfig("#ffd43b", 8.0, 40), paged = true).writeTo(scene)
+        File(out, "paged.excalidraw").writeText(scene.toJson())
+
+        // meta round-trips
+        val back = NoteMeta.readFrom(ExcalidrawScene.parse(scene.toJson()))
+        assertEquals("highlighter", back.tool); assertEquals(PenConfig("#2f9e44", 1.5, 100), back.pen); assertTrue(back.paged)
+
+        // relayout to horizontal moves page 2 and its strokes by the same delta
+        val before = scene.elements.first { it.frameId == p2.id }
+        Pages.relayout(scene, PageDirection.HORIZONTAL)
+        val p2After = Pages.pages(scene)[1]
+        val after = scene.elements.first { it.id == before.id }
+        assertEquals(p2After.x - p2.x, after.x - before.x, 1e-9)
+        assertEquals(p2After.y - p2.y, after.y - before.y, 1e-9)
+        assertEquals(p1.x + p1.w + Pages.GAP, p2After.x, 1e-9)
     }
 }

@@ -57,3 +57,22 @@ window.runVerify = async (sceneText, outlines, keys) => {
   report.svgEmbedsImage = svg.outerHTML.includes('data:image/png;base64');
   return report;
 };
+
+// A4 note: frames as pages, frameIds, locked page image, pen config in appState.
+window.runPaged = async (sceneText) => {
+  const raw = JSON.parse(sceneText);
+  const restored = restore(raw, null, null);
+  const els = restored.elements;
+  const r = {};
+  r.framesKept = els.filter((e) => e.type === "frame").length === raw.elements.filter((e) => e.type === "frame").length;
+  r.frameIdsKept = raw.elements.filter((e) => e.frameId).every((e) => els.find((x) => x.id === e.id)?.frameId === e.frameId);
+  r.lockedImageKept = els.some((e) => e.type === "image" && e.locked === true && e.frameId);
+  r.penColorRestored = restored.appState.currentItemStrokeColor === raw.appState.currentItemStrokeColor;
+  r.penWidthRestored = restored.appState.currentItemStrokeWidth === raw.appState.currentItemStrokeWidth;
+  r.pageNamesKept = els.filter((e) => e.type === "frame").map((e) => e.name).join(",") === "Page 1,Page 2";
+  const svg = await exportToSvg({ elements: els, appState: { ...restored.appState, exportBackground: true, viewBackgroundColor: "#ffffff", frameRendering: { enabled: true, name: true, outline: true, clip: true } }, files: restored.files, skipInliningFonts: true });
+  r.svgClipsToFrames = svg.outerHTML.includes("clipPath") || svg.outerHTML.includes("clip-path");
+  document.body.innerHTML = "";
+  document.body.appendChild(svg);
+  return r;
+};

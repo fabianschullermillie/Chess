@@ -17,4 +17,13 @@ if (report.elementsIn !== report.elementsAfterRestore) failures.push("elements d
 for (const p of report.paths) if (!p.exactStringMatch) failures.push("stroke outline differs: " + p.id);
 if (failures.length) { console.error("COMPAT FAILURES:", failures); process.exitCode = 1; }
 await page.locator("svg").first().screenshot({ path: process.argv[3] });
+// ---- paged note
+if (fs.existsSync(dir + "/paged.excalidraw")) {
+  const paged = fs.readFileSync(dir + "/paged.excalidraw", "utf8");
+  const pr = await page.evaluate((s) => window.runPaged(s), paged);
+  console.log(JSON.stringify(pr, null, 1));
+  for (const [k, v] of Object.entries(pr)) if (v !== true) { console.error("COMPAT FAILURE (paged):", k); process.exitCode = 1; }
+  await page.setViewportSize({ width: 700, height: 1200 });
+  await page.locator("svg").first().screenshot({ path: process.argv[3].replace(".png", "-paged.png") });
+}
 await browser.close();

@@ -1,119 +1,148 @@
 package dev.inkcalidraw
 
+import android.animation.ValueAnimator
+import android.annotation.SuppressLint
+import android.content.ClipboardManager
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.RectF
-import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.view.DragEvent
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.ink.authoring.InProgressStrokeId
-import androidx.ink.authoring.InProgressStrokesFinishedListener
-import androidx.ink.authoring.InProgressStrokesView
-import androidx.ink.brush.Brush
-import androidx.ink.brush.BrushBehavior
-import androidx.ink.brush.BrushFamily
-import androidx.ink.brush.BrushPaint
-import androidx.ink.brush.BrushTip
-import androidx.ink.brush.ExperimentalInkCustomBrushApi
-import androidx.ink.strokes.Stroke
-import androidx.ink.strokes.StrokeInput
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.input.motionprediction.MotionEventPredictor
 import kotlinx.serialization.json.JsonPrimitive
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.hypot
 
-class EditorActivity : ComponentActivity(), InProgressStrokesFinishedListener {
+class EditorActivity : ComponentActivity() {
 
-    enum class Tool { PEN, HIGHLIGHTER, SELECT, ERASER }
+    enum class Tool(val key: String) { PEN("pen"), HIGHLIGHTER("highlighter"), ERASER("eraser"), SELECT("select") }
 
+    private lateinit var ui: Ui
     private lateinit var store: NoteStore
-    private lateinit var sceneView: SceneView
-    private lateinit var inkView: InProgressStrokesView
+    private lateinit var colors: ColorHistory
+    private lateinit var surface: CanvasSurface
     private lateinit var predictor: MotionEventPredictor
     private lateinit var titleView: TextView
-    private lateinit var selectionBar: View
-    private val toolButtons = mutableMapOf<Tool, TextView>()
+    private lateinit var selectionBar: LinearLayout
+    private lateinit var selectionCount: TextView
+    private lateinit var pageNav: LinearLayout
+    private lateinit var pageLabel: TextView
+    private lateinit var menuAnchor: View
+    private lateinit var colorDot: View
+    private lateinit var recentRow: LinearLayout
+    private val toolButtons = mutableMapOf<Tool, ImageView>()
 
     private var scene = ExcalidrawScene.empty()
+    private var meta = NoteMeta()
     private var noteUri: Uri? = null
     private var dirty = false
     private val io = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private val autosave = Runnable { saveNow() }
-
     private val undo = ArrayDeque<List<Element>>()
     private val redo = ArrayDeque<List<Element>>()
 
-    // Tool state
+    /** world -> screen */
+    private val view = Matrix()
     private var tool = Tool.PEN
-    private var color = "#1e1e1e"
-    private var strokeWidth = 2 // Excalidraw: 1 thin, 2 bold, 4 extra bold
+    private var lassoArmed = false
+    private var penOnly = true
 
-    // Stylus gesture state
-    private enum class Gesture { NONE, INK, ERASE, LASSO, DRAG, RESIZE }
-    private var gesture = Gesture.NONE
-    private var stylusPointer = -1
-    private var strokeId: InProgressStrokeId? = null
-    private var eraseSnapshotTaken = false
+    // ---- drawing-pointer gesture state ----
+    private enum class G { NONE, INK, ERASE, LASSO, DRAG, RESIZE, BUTTON }
+    private var g = G.NONE
+    private var drawPointer = -1
+    private var strokeCounter = 0
+    private var samples = FloatArray(3 * 512)
+    private var sampleCount = 0
+    private var downX = 0f
+    private var downY = 0f
+    private var lastWorld = FloatArray(2)
+    private var eraseSnapshot = false
     private val lasso = ArrayList<FloatArray>()
-    private var dragStartX = 0f
-    private var dragStartY = 0f
+    private var selected: Set<String> = emptySet()
+    private var dragDx = 0f
+    private var dragDy = 0f
     private var resizeIndex = -1
+    private var eraserCursor: FloatArray? = null
+    private var hint: String? = null
+    private val holdForMenu = Runnable { onButtonHold() }
 
-    // Finger pan/zoom state
+    // ---- finger navigation ----
     private var lastFocusX = 0f
     private var lastFocusY = 0f
     private var lastSpan = 0f
     private var lastFingerCount = 0
+    private var fingerVx = 0f
+    private var lastMoveTime = 0L
+    private var zoomedThisGesture = false
+    private var animator: ValueAnimator? = null
 
+    private val pickPdf = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let { insertPdf(it) } }
+    private val exportPdf = registerForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri -> uri?.let { writePdf(it) } }
+
+    // =============================================================== lifecycle
+
+    @SuppressLint("ClickableViewAccessibility")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ui = Ui.of(this)
         store = NoteStore(this)
-        sceneView = SceneView(this)
-        inkView = InProgressStrokesView(this)
-        inkView.addFinishedStrokesListener(this)
-        predictor = MotionEventPredictor.newInstance(inkView)
-        inkView.setOnTouchListener { v, ev -> onTouch(v, ev); true }
-        selectionBar = buildSelectionBar()
+        colors = ColorHistory(this)
+        penOnly = getSharedPreferences("ui", 0).getBoolean("penOnly", true)
+
+        surface = CanvasSurface(this, ui)
+        predictor = MotionEventPredictor.newInstance(surface)
+        surface.setOnTouchListener { v, ev -> onTouch(v, ev); true }
+        surface.setOnHoverListener { _, ev -> onHover(ev); false }
+        menuAnchor = View(this)
 
         val canvasLayer = FrameLayout(this).apply {
-            addView(sceneView, FrameLayout.LayoutParams(-1, -1))
-            addView(inkView, FrameLayout.LayoutParams(-1, -1))
-            addView(selectionBar, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(12) })
+            addView(surface, FrameLayout.LayoutParams(-1, -1))
+            addView(menuAnchor, FrameLayout.LayoutParams(1, 1))
+            addView(buildSelectionBar(), FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = ui.dpi(12) })
+            addView(buildPageNav(), FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = ui.dpi(16) })
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#f4f4f6"))
-            addView(buildToolbar(), LinearLayout.LayoutParams(-1, dp(56)))
+            setBackgroundColor(ui.bar)
+            addView(buildToolbar(), LinearLayout.LayoutParams(-1, ui.dpi(56)))
+            addView(View(context).apply { setBackgroundColor(ui.divider) }, LinearLayout.LayoutParams(-1, ui.dpi(1)))
             addView(canvasLayer, LinearLayout.LayoutParams(-1, 0, 1f))
         }
         root.setOnApplyWindowInsetsListener { v, insets ->
-            val bars = insets.getInsets(WindowInsets.Type.systemBars())
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom); insets
+            val b = insets.getInsets(WindowInsets.Type.systemBars()); v.setPadding(b.left, b.top, b.right, b.bottom); insets
         }
         setContentView(root)
-        setupDragAndDrop(canvasLayer)
+        window.statusBarColor = ui.bar
+        setupDragAndDrop(surface)
 
-        val uri = intent?.data
-        if (uri == null) {
-            open(store.create().uri, null)
-        } else {
-            open(uri, intent.getStringExtra(EXTRA_NAME))
-        }
+        val uri = intent?.data ?: store.create().uri
+        open(uri, intent.getStringExtra(EXTRA_NAME))
     }
+
+    override fun onResume() { super.onResume(); redraw() }
 
     override fun onPause() {
         super.onPause()
@@ -121,393 +150,643 @@ class EditorActivity : ComponentActivity(), InProgressStrokesFinishedListener {
         saveNow()
     }
 
-    // ---------------------------------------------------------------- input
+    override fun onDestroy() { surface.release(); super.onDestroy() }
+
+    // =============================================================== frame building
+
+    private fun scale() = CanvasSurface.scaleOf(view)
+
+    private fun visibleWorld(): Geometry.Box {
+        val inv = Matrix().also { view.invert(it) }
+        val r = RectF(0f, 0f, surface.width.toFloat(), surface.height.toFloat()); inv.mapRect(r)
+        return Geometry.Box(r.left.toDouble(), r.top.toDouble(), r.right.toDouble(), r.bottom.toDouble())
+    }
+
+    private fun buildFrame(): CanvasSurface.Frame {
+        val files = scene.files.toMap()
+        val elements = scene.snapshot()
+        val sel = selectionBox()
+        return CanvasSurface.Frame(
+            input = SceneRenderer.Input(
+                elements, { id -> (files[id]?.get("dataURL") as? JsonPrimitive)?.content }, scene.backgroundColor,
+                visible = if (surface.width > 0) visibleWorld().inflate(50.0) else null,
+                offsetIds = selected, dx = dragDx, dy = dragDy, paged = meta.paged, deskColor = ui.desk,
+            ),
+            matrix = Matrix(view),
+            lasso = if (g == G.LASSO) lasso.toList() else null,
+            selection = sel,
+            handle = if (sel != null && singleSelectedImage() != null) RectF(sel.right - 9f / scale(), sel.bottom - 9f / scale(), sel.right + 9f / scale(), sel.bottom + 9f / scale()) else null,
+            eraser = eraserCursor,
+            hint = hint,
+        )
+    }
+
+    private fun redraw() {
+        if (!::surface.isInitialized) return
+        surface.show(buildFrame())
+        updatePageNav()
+    }
+
+    // =============================================================== input: dispatch
+
+    private fun isPen(t: Int) = t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+    private fun draws(t: Int) = isPen(t) || (!penOnly && t == MotionEvent.TOOL_TYPE_FINGER)
 
     private fun onTouch(v: View, ev: MotionEvent) {
         val idx = ev.actionIndex
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                animator?.cancel()
                 val type = ev.getToolType(idx)
-                if (isPen(type) && stylusPointer == -1) {
-                    stylusPointer = ev.getPointerId(idx)
-                    penDown(v, ev, idx, type)
+                // With finger drawing on, a second finger turns a fresh finger stroke into navigation.
+                val drawIdx = if (drawPointer != -1) ev.findPointerIndex(drawPointer) else -1
+                if (!penOnly && drawIdx >= 0 && type == MotionEvent.TOOL_TYPE_FINGER && ev.getToolType(drawIdx) == MotionEvent.TOOL_TYPE_FINGER) {
+                    abortDrawing(ev); resetFingers(ev); return
+                }
+                // The pen always draws (palm or navigating fingers may be down); a finger only draws alone.
+                if (drawPointer == -1 && draws(type) && (isPen(type) || fingerCount(ev, idx) == 0)) {
+                    drawPointer = ev.getPointerId(idx)
+                    drawDown(v, ev, idx, type)
                     return
                 }
-                if (stylusPointer == -1) resetFingerGesture(ev)
+                if (drawPointer == -1) resetFingers(ev)
             }
             MotionEvent.ACTION_MOVE -> {
-                if (stylusPointer != -1) {
-                    val p = ev.findPointerIndex(stylusPointer)
-                    if (p >= 0) penMove(ev, p)
+                if (drawPointer != -1) {
+                    val p = ev.findPointerIndex(drawPointer)
+                    if (p >= 0) drawMove(ev, p)
                     return
                 }
                 fingerMove(ev)
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                if (ev.getPointerId(idx) == stylusPointer) {
-                    penUp(ev, idx, canceled = (ev.flags and MotionEvent.FLAG_CANCELED) != 0)
+                if (ev.getPointerId(idx) == drawPointer) {
+                    drawUp(ev, idx, canceled = (ev.flags and MotionEvent.FLAG_CANCELED) != 0)
                     return
                 }
-                if (stylusPointer == -1) resetFingerGesture(ev, excludeIndex = idx)
-            }
-            MotionEvent.ACTION_CANCEL -> if (stylusPointer != -1) penUp(ev, 0, canceled = true)
-        }
-    }
-
-    private fun penDown(v: View, ev: MotionEvent, idx: Int, toolType: Int) {
-        val sideButton = (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
-        val w = toWorld(ev.getX(idx), ev.getY(idx))
-        val sel = sceneView.selectionBounds()
-        gesture = when {
-            toolType == MotionEvent.TOOL_TYPE_ERASER || tool == Tool.ERASER -> Gesture.ERASE
-            resizeHandleHit(ev.getX(idx), ev.getY(idx)) -> Gesture.RESIZE
-            sel?.contains(w[0], w[1]) == true -> Gesture.DRAG // grab the selection with any tool
-            sideButton || tool == Tool.SELECT -> Gesture.LASSO
-            else -> Gesture.INK
-        }
-        when (gesture) {
-            Gesture.ERASE -> { eraseSnapshotTaken = false; eraseAt(w) }
-            Gesture.DRAG -> { dragStartX = w[0]; dragStartY = w[1] }
-            Gesture.RESIZE -> {
-                pushUndo()
-                resizeIndex = scene.elements.indexOfFirst { it.id == sceneView.selectedIds.single() }
-            }
-            Gesture.LASSO -> {
-                setSelection(emptySet())
-                lasso.clear(); lasso.add(w)
-                sceneView.lassoPath.reset(); sceneView.lassoPath.moveTo(w[0], w[1])
-                sceneView.showLasso = true; sceneView.invalidate()
-            }
-            Gesture.INK -> {
-                if (sceneView.selectedIds.isNotEmpty()) setSelection(emptySet())
-                v.requestUnbufferedDispatch(ev)
-                predictor.record(ev)
-                strokeId = inkView.startStroke(ev, stylusPointer, currentBrush(), worldFromScreen(), Matrix())
-            }
-            Gesture.NONE -> {}
-        }
-    }
-
-    private fun penMove(ev: MotionEvent, p: Int) {
-        when (gesture) {
-            Gesture.INK -> strokeId?.let { id ->
-                predictor.record(ev)
-                val predicted = predictor.predict()
-                try { inkView.addToStroke(ev, stylusPointer, id, predicted) } finally { predicted?.recycle() }
-            }
-            Gesture.ERASE -> {
-                for (h in 0 until ev.historySize) eraseAt(toWorld(ev.getHistoricalX(p, h), ev.getHistoricalY(p, h)))
-                eraseAt(toWorld(ev.getX(p), ev.getY(p)))
-            }
-            Gesture.LASSO -> {
-                for (h in 0 until ev.historySize) lassoTo(toWorld(ev.getHistoricalX(p, h), ev.getHistoricalY(p, h)))
-                lassoTo(toWorld(ev.getX(p), ev.getY(p)))
-                sceneView.invalidate()
-            }
-            Gesture.DRAG -> {
-                val w = toWorld(ev.getX(p), ev.getY(p))
-                sceneView.dragDx = w[0] - dragStartX; sceneView.dragDy = w[1] - dragStartY
-                sceneView.invalidate()
-            }
-            Gesture.RESIZE -> {
-                val i = resizeIndex
-                if (i >= 0) {
-                    val el = scene.elements[i]
-                    val w = toWorld(ev.getX(p), ev.getY(p))
-                    val aspect = if (el.width > 0) el.height / el.width else 1.0
-                    val nw = maxOf(16.0 / sceneView.scale(), maxOf(w[0] - el.x, (w[1] - el.y) / aspect))
-                    scene.elements[i] = el.withChanges("width" to JsonPrimitive(nw), "height" to JsonPrimitive(nw * aspect))
-                    sceneView.invalidate()
+                if (drawPointer == -1) {
+                    if (ev.actionMasked == MotionEvent.ACTION_UP) fingersReleased() else resetFingers(ev, exclude = idx)
                 }
             }
-            Gesture.NONE -> {}
+            MotionEvent.ACTION_CANCEL -> if (drawPointer != -1) abortDrawing(ev) else fingersReleased()
         }
     }
 
-    /** Only a single selected image gets a resize handle (bottom-right corner). */
-    private fun singleSelectedImage(): Element? =
-        sceneView.selectedIds.singleOrNull()?.let { id -> scene.elements.firstOrNull { it.id == id && it.type == "image" } }
+    /** Fingers other than [exclude] currently down that navigate. */
+    private fun fingerCount(ev: MotionEvent, exclude: Int = -1) =
+        (0 until ev.pointerCount).count { it != exclude && ev.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER }
 
-    private fun resizeHandleHit(sx: Float, sy: Float): Boolean {
-        val r = sceneView.handleRectWorld() ?: return false
-        val pt = floatArrayOf(r.centerX(), r.centerY()); sceneView.viewMatrix.mapPoints(pt)
-        return hypot(pt[0] - sx, pt[1] - sy) < dp(28)
+    private fun abortDrawing(ev: MotionEvent) {
+        if (g == G.INK) surface.cancelWet()
+        main.removeCallbacks(holdForMenu)
+        g = G.NONE; drawPointer = -1; eraserCursor = null; lasso.clear(); dragDx = 0f; dragDy = 0f
+        redraw()
     }
 
-    private fun penUp(ev: MotionEvent, idx: Int, canceled: Boolean) {
-        when (gesture) {
-            Gesture.INK -> strokeId?.let { id ->
-                if (canceled) inkView.cancelStroke(id, ev) else inkView.finishStroke(ev, stylusPointer, id)
+    private var lastPenNear = 0L
+
+    private fun onHover(ev: MotionEvent) {
+        if (!isPen(ev.getToolType(0))) return
+        lastPenNear = SystemClock.uptimeMillis()
+        val erasing = tool == Tool.ERASER || ev.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER ||
+            (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        val show = erasing && ev.actionMasked != MotionEvent.ACTION_HOVER_EXIT
+        eraserCursor = if (show) floatArrayOf(ev.x, ev.y, eraserRadiusPx()) else null
+        redraw()
+    }
+
+    private fun eraserRadiusPx() = ui.dp(14)
+
+    // =============================================================== input: drawing pointer
+
+    private fun toWorld(sx: Float, sy: Float) = floatArrayOf(sx, sy).also { Matrix().apply { view.invert(this) }.mapPoints(it) }
+
+    private fun drawDown(v: View, ev: MotionEvent, idx: Int, toolType: Int) {
+        val sx = ev.getX(idx); val sy = ev.getY(idx)
+        downX = sx; downY = sy
+        val w = toWorld(sx, sy)
+        lastWorld = w
+        val button = toolType == MotionEvent.TOOL_TYPE_STYLUS && (ev.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
+        val sel = selectionBox()
+        g = when {
+            toolType == MotionEvent.TOOL_TYPE_ERASER -> G.ERASE
+            button -> G.BUTTON
+            resizeHandleHit(sx, sy) -> G.RESIZE
+            sel != null && sel.contains(w[0], w[1]) -> G.DRAG
+            lassoArmed || tool == Tool.SELECT -> G.LASSO
+            tool == Tool.ERASER -> G.ERASE
+            else -> G.INK
+        }
+        when (g) {
+            G.BUTTON -> { main.postDelayed(holdForMenu, 450); eraserCursor = floatArrayOf(sx, sy, eraserRadiusPx()); redraw() }
+            G.ERASE -> { eraseSnapshot = false; eraseSweep(w, w); eraserCursor = floatArrayOf(sx, sy, eraserRadiusPx()); redraw() }
+            G.DRAG -> { lastWorld = w }
+            G.RESIZE -> { pushUndo(); resizeIndex = scene.elements.indexOfFirst { it.id == selected.single() } }
+            G.LASSO -> { setSelection(emptySet()); lasso.clear(); lasso.add(w); redraw() }
+            G.INK -> {
+                if (meta.paged && Pages.pageAt(Pages.pages(scene), w[0].toDouble(), w[1].toDouble()) == null) { g = G.NONE; return }
+                if (selected.isNotEmpty()) setSelection(emptySet())
+                v.requestUnbufferedDispatch(ev)
+                strokeCounter++
+                sampleCount = 0
+                addSample(w[0], w[1], pressureOf(ev, idx, -1))
+                predictor.record(ev)
+                renderWet(null)
             }
-            Gesture.LASSO -> {
-                sceneView.showLasso = false
-                if (!canceled) setSelection(elementsInLasso())
-                sceneView.invalidate()
-            }
-            Gesture.DRAG -> commitDrag(canceled)
-            Gesture.RESIZE -> { resizeIndex = -1; changed() }
             else -> {}
         }
-        gesture = Gesture.NONE; stylusPointer = -1; strokeId = null
     }
 
-    private fun isPen(t: Int) = t == MotionEvent.TOOL_TYPE_STYLUS || t == MotionEvent.TOOL_TYPE_ERASER
+    private fun pressureOf(ev: MotionEvent, idx: Int, h: Int): Float {
+        val p = if (h < 0) ev.getPressure(idx) else ev.getHistoricalPressure(idx, h)
+        return if (ev.getToolType(idx) == MotionEvent.TOOL_TYPE_FINGER) 0.5f else p.coerceIn(0f, 1f)
+    }
 
-    private fun toWorld(sx: Float, sy: Float) = floatArrayOf(sx, sy).also { worldFromScreen().mapPoints(it) }
+    private fun addSample(x: Float, y: Float, p: Float) {
+        if (sampleCount > 0 && samples[(sampleCount - 1) * 3] == x && samples[(sampleCount - 1) * 3 + 1] == y) return
+        if ((sampleCount + 1) * 3 > samples.size) samples = samples.copyOf(samples.size * 2)
+        samples[sampleCount * 3] = x; samples[sampleCount * 3 + 1] = y; samples[sampleCount * 3 + 2] = p
+        sampleCount++
+    }
 
-    private fun worldFromScreen() = Matrix().also { sceneView.viewMatrix.invert(it) }
+    private fun renderWet(predicted: MotionEvent?) {
+        val pen = meta.activePenFor(tool)
+        var arr = samples.copyOf(sampleCount * 3 + (predicted?.let { (it.historySize + 1) * 3 } ?: 0))
+        var total = sampleCount
+        if (predicted != null) {
+            val pi = predicted.findPointerIndex(drawPointer).takeIf { it >= 0 } ?: 0
+            fun push(sx: Float, sy: Float, p: Float) {
+                val w = toWorld(sx, sy)
+                if ((total + 1) * 3 > arr.size) arr = arr.copyOf(arr.size * 2 + 3)
+                arr[total * 3] = w[0]; arr[total * 3 + 1] = w[1]; arr[total * 3 + 2] = p; total++
+            }
+            for (h in 0 until predicted.historySize) push(predicted.getHistoricalX(pi, h), predicted.getHistoricalY(pi, h), pressureOf(predicted, pi, h))
+            push(predicted.getX(pi), predicted.getY(pi), pressureOf(predicted, pi, -1))
+        }
+        surface.renderWet(CanvasSurface.Wet(
+            strokeCounter, arr, sampleCount, total,
+            ui.sceneColor(SceneRenderer.parseColor(pen.color, Color.BLACK)), pen.strokeWidth, pen.opacity * 255 / 100, Matrix(view),
+        ))
+    }
 
-    // ---------------------------------------------------------------- finger pan / zoom
+    private fun drawMove(ev: MotionEvent, p: Int) {
+        when (g) {
+            G.INK -> {
+                for (h in 0 until ev.historySize) { val w = toWorld(ev.getHistoricalX(p, h), ev.getHistoricalY(p, h)); addSample(w[0], w[1], pressureOf(ev, p, h)) }
+                val w = toWorld(ev.getX(p), ev.getY(p)); addSample(w[0], w[1], pressureOf(ev, p, -1))
+                predictor.record(ev)
+                val predicted = predictor.predict()
+                try { renderWet(predicted) } finally { predicted?.recycle() }
+            }
+            G.BUTTON -> {
+                if (hypot(ev.getX(p) - downX, ev.getY(p) - downY) > ui.dp(6)) {
+                    main.removeCallbacks(holdForMenu)
+                    g = G.ERASE; eraseSnapshot = false
+                    eraseAlong(ev, p)
+                } else { eraserCursor = floatArrayOf(ev.getX(p), ev.getY(p), eraserRadiusPx()); }
+            }
+            G.ERASE -> eraseAlong(ev, p)
+            G.LASSO -> {
+                for (h in 0 until ev.historySize) lassoTo(toWorld(ev.getHistoricalX(p, h), ev.getHistoricalY(p, h)))
+                lassoTo(toWorld(ev.getX(p), ev.getY(p)))
+                redraw()
+            }
+            G.DRAG -> {
+                val w = toWorld(ev.getX(p), ev.getY(p))
+                dragDx = w[0] - lastWorld[0]; dragDy = w[1] - lastWorld[1]
+                redraw()
+            }
+            G.RESIZE -> resizeTo(toWorld(ev.getX(p), ev.getY(p)))
+            G.NONE -> {}
+        }
+    }
 
-    private fun fingerPointers(ev: MotionEvent, excludeIndex: Int = -1) =
-        (0 until ev.pointerCount).filter { it != excludeIndex && ev.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER }
+    private fun drawUp(ev: MotionEvent, idx: Int, canceled: Boolean) {
+        main.removeCallbacks(holdForMenu)
+        if (isPen(ev.getToolType(idx))) lastPenNear = SystemClock.uptimeMillis()
+        when (g) {
+            G.INK -> if (canceled) surface.cancelWet() else commitStroke()
+            G.BUTTON -> if (!canceled) { eraseSnapshot = false; val w = toWorld(ev.getX(idx), ev.getY(idx)); eraseSweep(w, w) }
+            G.LASSO -> { if (!canceled) setSelection(elementsInLasso()); lassoArmed = false; updateToolButtons() }
+            G.DRAG -> commitDrag(canceled)
+            G.RESIZE -> { resizeIndex = -1; markDirty() }
+            else -> {}
+        }
+        g = G.NONE; drawPointer = -1; eraserCursor = null; lasso.clear()
+        redraw()
+    }
 
-    private fun resetFingerGesture(ev: MotionEvent, excludeIndex: Int = -1) {
-        val f = fingerPointers(ev, excludeIndex)
+    private fun commitStroke() {
+        if (sampleCount == 0) { surface.cancelWet(); return }
+        val pen = meta.activePenFor(tool)
+        val pts = (0 until sampleCount).map { floatArrayOf(samples[it * 3], samples[it * 3 + 1], samples[it * 3 + 2]) }
+        val frameId = if (meta.paged) Pages.pageAt(Pages.pages(scene), pts[0][0].toDouble(), pts[0][1].toDouble())?.id else null
+        pushUndo()
+        scene.elements.add(ExcalidrawScene.newFreedraw(pts, pen.color, pen.strokeWidth, FractionalIndex.after(scene.lastIndex()), pen.opacity, frameId))
+        markDirty()
+        surface.commitWet(buildFrame()) // scene with the new stroke replaces the wet ink atomically
+    }
+
+    // =============================================================== pen button menu
+
+    private fun onButtonHold() {
+        if (g != G.BUTTON) return
+        g = G.NONE; eraserCursor = null; redraw()
+        val at = toWorld(downX, downY)
+        menuAnchor.x = downX; menuAnchor.y = downY
+        PopupMenu(this, menuAnchor).apply {
+            menu.add("Lasso select")
+            menu.add("Paste here")
+            menu.add(if (meta.paged) "Select all on page" else "Select all")
+            if (selected.isNotEmpty()) { menu.add("Duplicate selection"); menu.add("Delete selection") }
+            setOnMenuItemClickListener {
+                when (it.title.toString()) {
+                    "Lasso select" -> { lassoArmed = true; toast("Draw a lasso around what you want to select") }
+                    "Paste here" -> pasteFromClipboard(at)
+                    "Select all" -> setSelection(scene.elements.filter { e -> !e.isDeleted && !e.locked && e.type != "frame" }.map { e -> e.id }.toSet())
+                    "Select all on page" -> {
+                        val page = Pages.pageAt(Pages.pages(scene), at[0].toDouble(), at[1].toDouble())
+                        setSelection(scene.elements.filter { e -> !e.isDeleted && !e.locked && e.type != "frame" && (page == null || e.frameId == page.id) }.map { e -> e.id }.toSet())
+                    }
+                    "Duplicate selection" -> duplicateSelection()
+                    "Delete selection" -> deleteSelection()
+                }
+                true
+            }
+        }.show()
+    }
+
+    // =============================================================== eraser
+
+    private fun eraseAlong(ev: MotionEvent, p: Int) {
+        var prev = lastWorld
+        for (h in 0 until ev.historySize) { val w = toWorld(ev.getHistoricalX(p, h), ev.getHistoricalY(p, h)); eraseSweep(prev, w); prev = w }
+        val w = toWorld(ev.getX(p), ev.getY(p)); eraseSweep(prev, w)
+        eraserCursor = floatArrayOf(ev.getX(p), ev.getY(p), eraserRadiusPx())
+        redraw()
+    }
+
+    /** Deletes every element the eraser circle touched while sweeping from a to b. */
+    private fun eraseSweep(a: FloatArray, b: FloatArray) {
+        lastWorld = b
+        val r = (eraserRadiusPx() / scale()).toDouble()
+        var hit = false
+        for (i in scene.elements.indices) {
+            val el = scene.elements[i]
+            if (el.isDeleted || el.locked || el.type == "frame") continue
+            if (Geometry.eraserHits(el, a[0].toDouble(), a[1].toDouble(), b[0].toDouble(), b[1].toDouble(), r)) {
+                if (!eraseSnapshot) { pushUndo(); eraseSnapshot = true }
+                scene.elements[i] = el.withChanges("isDeleted" to JsonPrimitive(true))
+                hit = true
+            }
+        }
+        if (hit) { selected = selected - scene.elements.filter { it.isDeleted }.map { it.id }.toSet(); markDirty() }
+    }
+
+    // =============================================================== selection
+
+    private fun lassoTo(w: FloatArray) {
+        val last = lasso.last()
+        if (hypot(w[0] - last[0], w[1] - last[1]) * scale() < 2f) return
+        lasso.add(w)
+    }
+
+    private fun elementsInLasso(): Set<String> {
+        if (lasso.size < 3) return emptySet()
+        val poly = lasso.map { doubleArrayOf(it[0].toDouble(), it[1].toDouble()) }
+        val ids = mutableSetOf<String>()
+        for (el in scene.elements) {
+            if (el.isDeleted || el.locked || el.type == "frame") continue
+            val pts: List<DoubleArray> = when (el.type) {
+                "freedraw", "line", "arrow" -> el.points.map { doubleArrayOf(el.x + it[0], el.y + it[1]) }
+                else -> listOf(doubleArrayOf(el.x + el.width / 2, el.y + el.height / 2))
+            }
+            if (pts.isEmpty()) continue
+            if (pts.count { Geometry.pointInPolygon(it[0], it[1], poly) } >= pts.size * 0.6) ids += el.id
+        }
+        return ids
+    }
+
+    private fun selectionBox(): RectF? {
+        if (selected.isEmpty()) return null
+        val b = Geometry.contentBounds(scene.elements.filter { it.id in selected }) ?: return null
+        return RectF(b.minX.toFloat() + dragDx, b.minY.toFloat() + dragDy, b.maxX.toFloat() + dragDx, b.maxY.toFloat() + dragDy)
+    }
+
+    private fun singleSelectedImage(): Element? =
+        selected.singleOrNull()?.let { id -> scene.elements.firstOrNull { it.id == id && it.type == "image" } }
+
+    private fun resizeHandleHit(sx: Float, sy: Float): Boolean {
+        if (singleSelectedImage() == null) return false
+        val r = selectionBox() ?: return false
+        val pt = floatArrayOf(r.right, r.bottom); view.mapPoints(pt)
+        return hypot(pt[0] - sx, pt[1] - sy) < ui.dp(28)
+    }
+
+    private fun resizeTo(w: FloatArray) {
+        val i = resizeIndex
+        if (i < 0) return
+        val el = scene.elements[i]
+        val aspect = if (el.width > 0) el.height / el.width else 1.0
+        val nw = maxOf(16.0 / scale(), maxOf(w[0] - el.x, (w[1] - el.y) / aspect))
+        scene.elements[i] = el.withChanges("width" to JsonPrimitive(nw), "height" to JsonPrimitive(nw * aspect))
+        redraw()
+    }
+
+    private fun setSelection(ids: Set<String>) {
+        selected = ids
+        dragDx = 0f; dragDy = 0f
+        selectionBar.visibility = if (ids.isEmpty()) View.GONE else View.VISIBLE
+        selectionCount.text = "${ids.size} selected"
+        redraw()
+    }
+
+    private fun commitDrag(canceled: Boolean) {
+        val dx = dragDx; val dy = dragDy
+        dragDx = 0f; dragDy = 0f
+        if (canceled || (dx == 0f && dy == 0f)) return
+        pushUndo()
+        val pages = Pages.pages(scene)
+        for (i in scene.elements.indices) {
+            val el = scene.elements[i]
+            if (el.id !in selected) continue
+            val moved = el.withChanges("x" to JsonPrimitive(el.x + dx), "y" to JsonPrimitive(el.y + dy))
+            scene.elements[i] = if (meta.paged) moved.withChanges("frameId" to (Pages.frameFor(pages, moved)?.let { JsonPrimitive(it) } ?: kotlinx.serialization.json.JsonNull)) else moved
+        }
+        markDirty()
+    }
+
+    private fun deleteSelection() {
+        if (selected.isEmpty()) return
+        pushUndo()
+        for (i in scene.elements.indices) if (scene.elements[i].id in selected) scene.elements[i] = scene.elements[i].withChanges("isDeleted" to JsonPrimitive(true))
+        setSelection(emptySet()); markDirty()
+    }
+
+    private fun duplicateSelection() {
+        if (selected.isEmpty()) return
+        pushUndo()
+        val offset = 24.0 / scale()
+        val copies = scene.elements.filter { it.id in selected && !it.isDeleted }.map { el ->
+            el.copyAsNew(FractionalIndex.after(scene.lastIndex())).withChanges("x" to JsonPrimitive(el.x + offset), "y" to JsonPrimitive(el.y + offset))
+                .also { scene.elements.add(it) }
+        }
+        setSelection(copies.map { it.id }.toSet()); markDirty()
+    }
+
+    private fun recolorSelection() {
+        if (selected.isEmpty()) return
+        pushUndo()
+        val c = meta.activePenFor(tool).color
+        for (i in scene.elements.indices) if (scene.elements[i].id in selected && scene.elements[i].type != "image") scene.elements[i] = scene.elements[i].withChanges("strokeColor" to JsonPrimitive(c))
+        markDirty()
+    }
+
+    // =============================================================== finger navigation
+
+    private fun navFingers(ev: MotionEvent, exclude: Int = -1) =
+        (0 until ev.pointerCount).filter { it != exclude && ev.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER }
+
+    private fun resetFingers(ev: MotionEvent, exclude: Int = -1) {
+        val f = navFingers(ev, exclude)
         lastFingerCount = f.size
         if (f.isEmpty()) return
         lastFocusX = f.map { ev.getX(it) }.average().toFloat()
         lastFocusY = f.map { ev.getY(it) }.average().toFloat()
         lastSpan = span(ev, f, lastFocusX, lastFocusY)
+        lastMoveTime = SystemClock.uptimeMillis()
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) { zoomedThisGesture = false; fingerVx = 0f }
     }
 
     private fun span(ev: MotionEvent, f: List<Int>, cx: Float, cy: Float) =
         if (f.size < 2) 0f else f.map { hypot(ev.getX(it) - cx, ev.getY(it) - cy) }.average().toFloat()
 
     private fun fingerMove(ev: MotionEvent) {
-        val f = fingerPointers(ev)
+        val f = navFingers(ev)
         if (f.isEmpty()) return
-        if (f.size != lastFingerCount) { resetFingerGesture(ev); return }
+        if (f.size != lastFingerCount) { resetFingers(ev); return }
+        // Palm rejection: a hand resting while the pen hovers shouldn't scroll the page.
+        if (SystemClock.uptimeMillis() - lastPenNear < 400) { lastFocusX = f.map { ev.getX(it) }.average().toFloat(); lastFocusY = f.map { ev.getY(it) }.average().toFloat(); return }
+        // Finger drawing on: one finger draws, so navigation needs two.
+        if (!penOnly && f.size < 2) return
         val fx = f.map { ev.getX(it) }.average().toFloat()
         val fy = f.map { ev.getY(it) }.average().toFloat()
         val s = span(ev, f, fx, fy)
-        sceneView.viewMatrix.postTranslate(fx - lastFocusX, fy - lastFocusY)
+        val now = SystemClock.uptimeMillis()
+        val dt = (now - lastMoveTime).coerceAtLeast(1)
+        fingerVx = 0.7f * fingerVx + 0.3f * ((fx - lastFocusX) * 1000f / dt)
+        lastMoveTime = now
+        view.postTranslate(fx - lastFocusX, fy - lastFocusY)
         if (f.size >= 2 && lastSpan > 0f && s > 0f) {
-            val cur = sceneView.scale()
-            val k = (cur * (s / lastSpan)).coerceIn(0.1f, 30f) / cur
-            sceneView.viewMatrix.postScale(k, k, fx, fy)
+            val cur = scale()
+            val k = (cur * (s / lastSpan)).coerceIn(0.05f, 30f) / cur
+            if (abs(k - 1f) > 0.002f) zoomedThisGesture = true
+            view.postScale(k, k, fx, fy)
         }
         lastFocusX = fx; lastFocusY = fy; lastSpan = s
-        sceneView.invalidate()
+        hint = if (meta.paged && overscrollPastLastPage() > 0.28f) "Release to add a page" else null
+        redraw()
     }
 
-    // ---------------------------------------------------------------- ink
-
-    /**
-     * Wet-ink brush tuned to approximate Excalidraw's perfect-freehand width curve:
-     * width(p) = 2 * size * sin((0.5 - 0.6 * (0.5 - p)) * PI/2), size = strokeWidth * 4.25.
-     */
-    @OptIn(ExperimentalInkCustomBrushApi::class)
-    private fun currentBrush(): Brush {
-        val family = BrushFamily(
-            tip = BrushTip(behaviors = listOf(
-                BrushBehavior(BrushBehavior.Source.NORMALIZED_PRESSURE, BrushBehavior.Target.WIDTH_MULTIPLIER, 0f, 1f, 0.437f, 1.345f)
-            )),
-            paint = BrushPaint(),
-        )
-        val (w, opacity) = penStyle()
-        val argb = SceneRenderer.parseColor(color, Color.BLACK)
-        val withAlpha = Color.argb(opacity * 255 / 100, Color.red(argb), Color.green(argb), Color.blue(argb))
-        return Brush.createWithColorIntArgb(family, withAlpha, w * 4.25f * 1.414f, 0.1f)
+    /** How far (as a fraction of the viewport) the view is pulled past the end of the last page. */
+    private fun overscrollPastLastPage(): Float {
+        val last = Pages.pages(scene).lastOrNull() ?: return 0f
+        val pt = floatArrayOf((last.x + last.w).toFloat(), (last.y + last.h).toFloat()); view.mapPoints(pt)
+        return if (meta.direction == PageDirection.VERTICAL) (surface.height - pt[1]) / surface.height
+        else (surface.width - pt[0]) / surface.width
     }
 
-    /** (Excalidraw strokeWidth, opacity) for the current tool. */
-    private fun penStyle(): Pair<Int, Int> = if (tool == Tool.HIGHLIGHTER) Pair(maxOf(strokeWidth * 3, 6), 40) else Pair(strokeWidth, 100)
-
-    override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
-        pushUndo()
-        var idx = scene.lastIndex()
-        val (w, opacity) = penStyle()
-        for ((_, stroke) in strokes) {
-            val inputs = stroke.inputs
-            if (inputs.size == 0) continue
-            val tmp = StrokeInput()
-            val samples = (0 until inputs.size).map { i ->
-                inputs.populate(i, tmp)
-                floatArrayOf(tmp.x, tmp.y, if (tmp.hasPressure) tmp.pressure else 0.5f)
-            }
-            idx = FractionalIndex.after(idx)
-            scene.elements.add(ExcalidrawScene.newFreedraw(samples, color, w, idx, opacity))
+    private fun fingersReleased() {
+        lastFingerCount = 0
+        if (!meta.paged) { hint = null; redraw(); return }
+        if (hint != null) {
+            hint = null
+            addPage(goTo = true)
+            return
         }
-        changed()
-        inkView.removeFinishedStrokes(strokes.keys)
-    }
-
-    // ---------------------------------------------------------------- eraser
-
-    private fun eraseAt(w: FloatArray) {
-        val r = 12.0 / sceneView.scale()
-        var hit = false
-        for (i in scene.elements.indices) {
-            val el = scene.elements[i]
-            if (el.isDeleted || isLocked(el)) continue
-            if (hits(el, w[0].toDouble(), w[1].toDouble(), r)) {
-                if (!eraseSnapshotTaken) { pushUndo(); eraseSnapshotTaken = true }
-                scene.elements[i] = el.withChanges("isDeleted" to JsonPrimitive(true))
-                hit = true
+        // Horizontal page mode: swipe/snap page by page, like Samsung Notes. Skip when zoomed into a page.
+        if (meta.direction == PageDirection.HORIZONTAL && !zoomedThisGesture) {
+            val pages = Pages.pages(scene)
+            if (pages.isEmpty()) return
+            val cur = currentPageIndex()
+            val p = pages[cur]
+            val fitsWidth = p.w * scale() <= surface.width * 1.05f
+            if (fitsWidth) {
+                val target = when {
+                    fingerVx < -900 -> (cur + 1).coerceAtMost(pages.size - 1)
+                    fingerVx > 900 -> (cur - 1).coerceAtLeast(0)
+                    else -> cur
+                }
+                goToPage(target, keepScale = true)
             }
         }
-        if (hit) changed()
     }
 
-    private fun isLocked(el: Element) = (el.json["locked"] as? JsonPrimitive)?.content == "true"
+    // =============================================================== pages
 
-    private fun hits(el: Element, wx: Double, wy: Double, r: Double): Boolean {
-        val lx = wx - el.x; val ly = wy - el.y
-        if (el.type == "freedraw" || el.type == "line" || el.type == "arrow") {
-            val pts = el.points
-            val rr = r + el.strokeWidth * 2
-            if (pts.size == 1) return hypot(pts[0][0] - lx, pts[0][1] - ly) <= rr
-            for (k in 0 until pts.size - 1) if (segDist(lx, ly, pts[k], pts[k + 1]) <= rr) return true
-            return false
-        }
-        return RectF(0f, 0f, el.width.toFloat(), el.height.toFloat()).apply { inset(-r.toFloat(), -r.toFloat()) }.contains(lx.toFloat(), ly.toFloat())
+    private fun currentPageIndex(): Int {
+        val c = toWorld(surface.width / 2f, surface.height / 2f)
+        return Pages.nearest(Pages.pages(scene), c[0].toDouble(), c[1].toDouble()).coerceAtLeast(0)
     }
 
-    private fun segDist(px: Double, py: Double, a: DoubleArray, b: DoubleArray): Double {
-        val dx = b[0] - a[0]; val dy = b[1] - a[1]
-        val l2 = dx * dx + dy * dy
-        val t = if (l2 == 0.0) 0.0 else (((px - a[0]) * dx + (py - a[1]) * dy) / l2).coerceIn(0.0, 1.0)
-        return hypot(px - (a[0] + t * dx), py - (a[1] + t * dy))
+    private fun updatePageNav() {
+        if (!::pageNav.isInitialized) return
+        val pages = if (meta.paged) Pages.pages(scene) else emptyList()
+        pageNav.visibility = if (pages.isEmpty()) View.GONE else View.VISIBLE
+        if (pages.isNotEmpty()) pageLabel.text = "${currentPageIndex() + 1} / ${pages.size}"
     }
 
-    // ---------------------------------------------------------------- selection
-
-    private fun lassoTo(w: FloatArray) {
-        val last = lasso.last()
-        if (hypot(w[0] - last[0], w[1] - last[1]) * sceneView.scale() < 2f) return
-        lasso.add(w); sceneView.lassoPath.lineTo(w[0], w[1])
-    }
-
-    private fun elementsInLasso(): Set<String> {
-        if (lasso.size < 3) return emptySet()
-        val poly = lasso.toList()
-        val ids = mutableSetOf<String>()
-        for (el in scene.elements) {
-            if (el.isDeleted || isLocked(el)) continue
-            val samples: List<FloatArray> = when (el.type) {
-                "freedraw", "line", "arrow" -> el.points.map { floatArrayOf((el.x + it[0]).toFloat(), (el.y + it[1]).toFloat()) }
-                else -> listOf(floatArrayOf((el.x + el.width / 2).toFloat(), (el.y + el.height / 2).toFloat()))
+    private fun animateTo(target: Matrix) {
+        animator?.cancel()
+        val from = FloatArray(9).also { view.getValues(it) }
+        val to = FloatArray(9).also { target.getValues(it) }
+        animator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 260; interpolator = DecelerateInterpolator()
+            addUpdateListener { a ->
+                val t = a.animatedValue as Float
+                view.setValues(FloatArray(9) { from[it] + (to[it] - from[it]) * t })
+                redraw()
             }
-            if (samples.isEmpty()) continue
-            val inside = samples.count { pointInPolygon(it[0], it[1], poly) }
-            if (inside >= samples.size * 0.6) ids += el.id
+            start()
         }
-        return ids
     }
 
-    private fun pointInPolygon(x: Float, y: Float, poly: List<FloatArray>): Boolean {
-        var inside = false
-        var j = poly.size - 1
-        for (i in poly.indices) {
-            val (xi, yi) = poly[i][0] to poly[i][1]
-            val (xj, yj) = poly[j][0] to poly[j][1]
-            if ((yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside
-            j = i
+    private fun goToPage(i: Int, keepScale: Boolean) {
+        val pages = Pages.pages(scene)
+        val p = pages.getOrNull(i) ?: return
+        val vw = surface.width.toFloat(); val vh = surface.height.toFloat()
+        val s = if (keepScale) scale() else minOf(vw / p.w.toFloat(), vh / p.h.toFloat()) * 0.94f
+        val m = Matrix()
+        m.setScale(s, s)
+        val pw = p.w.toFloat() * s; val ph = p.h.toFloat() * s
+        val tx = (vw - pw) / 2 - p.x.toFloat() * s
+        val ty = if (meta.direction == PageDirection.VERTICAL || ph > vh) ui.dp(16) - p.y.toFloat() * s else (vh - ph) / 2 - p.y.toFloat() * s
+        m.postTranslate(tx, ty)
+        animateTo(m)
+    }
+
+    private fun fitPage() { goToPage(currentPageIndex(), keepScale = false) }
+
+    private fun fitWidth() {
+        val p = Pages.pages(scene).getOrNull(currentPageIndex()) ?: return
+        val vw = surface.width.toFloat()
+        val s = vw * 0.96f / p.w.toFloat()
+        val centerWorldY = toWorld(0f, surface.height / 2f)[1]
+        val m = Matrix().apply { setScale(s, s); postTranslate((vw - p.w.toFloat() * s) / 2 - p.x.toFloat() * s, surface.height / 2f - centerWorldY * s) }
+        animateTo(m)
+    }
+
+    private fun fitContent() {
+        val b = Geometry.contentBounds(scene.elements)
+        val m = Matrix()
+        if (b != null && surface.width > 0) {
+            val bb = b.inflate(40.0)
+            val s = minOf(surface.width / bb.width, surface.height / bb.height, 1.0).toFloat()
+            m.setTranslate(-bb.minX.toFloat(), -bb.minY.toFloat()); m.postScale(s, s)
         }
-        return inside
+        animateTo(m)
     }
 
-    private fun setSelection(ids: Set<String>) {
-        sceneView.selectedIds = ids
-        sceneView.showHandle = ids.size == 1 && scene.elements.any { it.id in ids && it.type == "image" }
-        sceneView.dragDx = 0f; sceneView.dragDy = 0f
-        selectionBar.visibility = if (ids.isEmpty()) View.GONE else View.VISIBLE
-        (selectionBar.tag as? TextView)?.text = "${ids.size} selected"
-        sceneView.invalidate()
-    }
-
-    private fun commitDrag(canceled: Boolean) {
-        val dx = sceneView.dragDx; val dy = sceneView.dragDy
-        sceneView.dragDx = 0f; sceneView.dragDy = 0f
-        if (canceled || (dx == 0f && dy == 0f)) { sceneView.invalidate(); return }
+    private fun addPage(goTo: Boolean) {
         pushUndo()
-        val ids = sceneView.selectedIds
-        for (i in scene.elements.indices) {
-            val el = scene.elements[i]
-            if (el.id in ids) scene.elements[i] = el.withChanges("x" to JsonPrimitive(el.x + dx), "y" to JsonPrimitive(el.y + dy))
-        }
-        changed()
+        Pages.addPage(scene, meta.orientation, meta.direction)
+        if (!meta.paged) meta = meta.copy(paged = true)
+        markDirty()
+        if (goTo) goToPage(Pages.pages(scene).size - 1, keepScale = true) else redraw()
     }
 
-    private fun deleteSelection() {
-        val ids = sceneView.selectedIds
-        if (ids.isEmpty()) return
+    private fun setDirection(d: PageDirection) {
+        if (d == meta.direction) return
         pushUndo()
-        for (i in scene.elements.indices) if (scene.elements[i].id in ids) scene.elements[i] = scene.elements[i].withChanges("isDeleted" to JsonPrimitive(true))
-        setSelection(emptySet()); changed()
+        meta = meta.copy(direction = d)
+        Pages.relayout(scene, d)
+        markDirty()
+        main.post { fitPage() }
     }
 
-    private fun duplicateSelection() {
-        val ids = sceneView.selectedIds
-        if (ids.isEmpty()) return
-        pushUndo()
-        var idx = scene.lastIndex()
-        val offset = 24.0 / sceneView.scale()
-        val copies = scene.elements.filter { it.id in ids && !it.isDeleted }.map { el ->
-            idx = FractionalIndex.after(idx)
-            el.copyAsNew(idx).withChanges("x" to JsonPrimitive(el.x + offset), "y" to JsonPrimitive(el.y + offset))
-        }
-        scene.elements.addAll(copies)
-        setSelection(copies.map { it.id }.toSet()); changed()
-    }
+    // =============================================================== images & PDF
 
-    private fun recolorSelection() {
-        val ids = sceneView.selectedIds
-        if (ids.isEmpty()) return
-        pushUndo()
-        for (i in scene.elements.indices) if (scene.elements[i].id in ids) scene.elements[i] = scene.elements[i].withChanges("strokeColor" to JsonPrimitive(color))
-        changed()
-    }
-
-    // ---------------------------------------------------------------- images (clipboard, drag & drop)
-
-    private fun pasteFromClipboard() {
-        val cm = getSystemService(android.content.ClipboardManager::class.java)
+    private fun pasteFromClipboard(at: FloatArray? = null) {
+        val cm = getSystemService(ClipboardManager::class.java)
         val clip = cm.primaryClip
         if (clip == null || clip.itemCount == 0) { toast("Clipboard is empty"); return }
         for (i in 0 until clip.itemCount) {
             val uri = clip.getItemAt(i).uri ?: continue
-            val mime = contentResolver.getType(uri) ?: clip.description.let { d -> (0 until d.mimeTypeCount).map { d.getMimeType(it) }.firstOrNull { it.startsWith("image/") } }
-            if (mime == null || mime.startsWith("image/")) { insertImage(uri, null); return }
+            val mime = contentResolver.getType(uri)
+            if (mime == null || mime.startsWith("image/")) { insertImage(uri, at); return }
         }
         toast("No image in the clipboard")
     }
 
-    /** Reads, normalises and inserts an image, centred at [at] (world coords) or the middle of the view. */
     private fun insertImage(uri: Uri, at: FloatArray?) {
-        val center = at ?: toWorld(sceneView.width / 2f, sceneView.height / 2f)
-        val visibleW = sceneView.width / sceneView.scale()
-        val visibleH = sceneView.height / sceneView.scale()
+        val center = at ?: toWorld(surface.width / 2f, surface.height / 2f)
+        val visibleW = surface.width / scale()
+        val visibleH = surface.height / scale()
         io.execute {
             try {
                 val img = ImageImport.load(contentResolver, uri)
                 runOnUiThread {
                     pushUndo()
                     scene.addFile(img.fileId, img.mimeType, img.dataUrl)
-                    // Fit inside 60% of what's on screen, never upscale.
-                    val k = minOf(1.0, visibleW * 0.6 / img.width, visibleH * 0.6 / img.height)
+                    val pages = Pages.pages(scene)
+                    val page = if (meta.paged) Pages.pageAt(pages, center[0].toDouble(), center[1].toDouble()) ?: pages.getOrNull(currentPageIndex()) else null
+                    val maxW = page?.w?.times(0.8) ?: (visibleW * 0.6).toDouble()
+                    val maxH = page?.h?.times(0.8) ?: (visibleH * 0.6).toDouble()
+                    val k = minOf(1.0, maxW / img.width, maxH / img.height)
                     val w = img.width * k; val h = img.height * k
-                    val el = ExcalidrawScene.newImage(img.fileId, center[0] - w / 2, center[1] - h / 2, w, h, FractionalIndex.after(scene.lastIndex()))
+                    val el = ExcalidrawScene.newImage(img.fileId, center[0] - w / 2, center[1] - h / 2, w, h, FractionalIndex.after(scene.lastIndex()), frameId = page?.id)
                     scene.elements.add(el)
                     setSelection(setOf(el.id))
-                    changed()
+                    markDirty()
                 }
             } catch (e: Exception) {
-                runOnUiThread { toast("Couldn't paste image: ${e.message}") }
+                runOnUiThread { toast("Couldn't insert image: ${e.message}") }
             }
+        }
+    }
+
+    private fun insertPdf(uri: Uri) {
+        val progress = Toast.makeText(this, "Importing PDF…", Toast.LENGTH_LONG).apply { show() }
+        val firstNew = Pages.pages(scene).size
+        pushUndo()
+        val target = scene
+        io.execute {
+            try {
+                val n = PdfSupport.import(this, uri, target, meta.direction)
+                runOnUiThread {
+                    progress.cancel()
+                    meta = meta.copy(paged = true)
+                    markDirty()
+                    toast("Added $n page${if (n == 1) "" else "s"}")
+                    main.post { goToPage(firstNew, keepScale = false) }
+                }
+            } catch (e: Exception) {
+                runOnUiThread { progress.cancel(); toast("Couldn't import PDF: ${e.message}") }
+            }
+        }
+    }
+
+    private fun writePdf(uri: Uri) {
+        val snapshot = ExcalidrawScene.parse(scene.toJson())
+        io.execute {
+            try {
+                contentResolver.openOutputStream(uri, "wt")!!.use { PdfSupport.export(snapshot, it) }
+                runOnUiThread { toast("PDF exported") }
+            } catch (e: Exception) { runOnUiThread { toast("Export failed: ${e.message}") } }
         }
     }
 
     private fun setupDragAndDrop(target: View) {
         target.setOnDragListener { _, ev ->
             when (ev.action) {
-                android.view.DragEvent.ACTION_DRAG_STARTED ->
-                    ev.clipDescription?.let { d -> (0 until d.mimeTypeCount).any { d.getMimeType(it).startsWith("image/") } } ?: false
-                android.view.DragEvent.ACTION_DROP -> {
+                DragEvent.ACTION_DRAG_STARTED ->
+                    ev.clipDescription?.let { d -> (0 until d.mimeTypeCount).any { d.getMimeType(it).startsWith("image/") || d.getMimeType(it) == "application/pdf" } } ?: false
+                DragEvent.ACTION_DROP -> {
                     requestDragAndDropPermissions(ev)
                     val uri = ev.clipData?.let { c -> (0 until c.itemCount).firstNotNullOfOrNull { c.getItemAt(it).uri } }
-                    if (uri != null) insertImage(uri, toWorld(ev.x, ev.y))
+                    if (uri != null) {
+                        if (contentResolver.getType(uri) == "application/pdf") insertPdf(uri) else insertImage(uri, toWorld(ev.x, ev.y))
+                    }
                     uri != null
                 }
                 else -> true
@@ -515,24 +794,24 @@ class EditorActivity : ComponentActivity(), InProgressStrokesFinishedListener {
         }
     }
 
-    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (event.isCtrlPressed) when (keyCode) {
-            android.view.KeyEvent.KEYCODE_V -> { pasteFromClipboard(); return true }
-            android.view.KeyEvent.KEYCODE_Z -> { if (event.isShiftPressed) doRedo() else doUndo(); return true }
-            android.view.KeyEvent.KEYCODE_Y -> { doRedo(); return true }
-            android.view.KeyEvent.KEYCODE_D -> { duplicateSelection(); return true }
+            KeyEvent.KEYCODE_V -> { pasteFromClipboard(); return true }
+            KeyEvent.KEYCODE_Z -> { if (event.isShiftPressed) doRedo() else doUndo(); return true }
+            KeyEvent.KEYCODE_Y -> { doRedo(); return true }
+            KeyEvent.KEYCODE_D -> { duplicateSelection(); return true }
+            KeyEvent.KEYCODE_A -> { setSelection(scene.elements.filter { !it.isDeleted && !it.locked && it.type != "frame" }.map { it.id }.toSet()); return true }
         }
         when (keyCode) {
-            android.view.KeyEvent.KEYCODE_PASTE -> { pasteFromClipboard(); return true }
-            android.view.KeyEvent.KEYCODE_FORWARD_DEL, android.view.KeyEvent.KEYCODE_DEL ->
-                if (sceneView.selectedIds.isNotEmpty()) { deleteSelection(); return true }
+            KeyEvent.KEYCODE_PASTE -> { pasteFromClipboard(); return true }
+            KeyEvent.KEYCODE_FORWARD_DEL, KeyEvent.KEYCODE_DEL -> if (selected.isNotEmpty()) { deleteSelection(); return true }
+            KeyEvent.KEYCODE_PAGE_DOWN -> if (meta.paged) { goToPage(currentPageIndex() + 1, true); return true }
+            KeyEvent.KEYCODE_PAGE_UP -> if (meta.paged) { goToPage(currentPageIndex() - 1, true); return true }
         }
         return super.onKeyDown(keyCode, event)
     }
 
-    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
-
-    // ---------------------------------------------------------------- undo / persistence
+    // =============================================================== undo / persistence
 
     private fun pushUndo() {
         undo.addLast(scene.elements.toList()); if (undo.size > 200) undo.removeFirst()
@@ -543,147 +822,259 @@ class EditorActivity : ComponentActivity(), InProgressStrokesFinishedListener {
         val prev = undo.removeLastOrNull() ?: return
         redo.addLast(scene.elements.toList())
         scene.elements.clear(); scene.elements.addAll(prev)
-        setSelection(emptySet()); changed()
+        setSelection(emptySet()); markDirty()
     }
 
     private fun doRedo() {
         val next = redo.removeLastOrNull() ?: return
         undo.addLast(scene.elements.toList())
         scene.elements.clear(); scene.elements.addAll(next)
-        setSelection(emptySet()); changed()
+        setSelection(emptySet()); markDirty()
     }
 
-    private fun changed() {
+    /** Scene changed: schedule autosave and redraw. */
+    private fun markDirty() {
         dirty = true
-        sceneView.invalidate()
         main.removeCallbacks(autosave)
         main.postDelayed(autosave, 1500)
+        redraw()
     }
+
+    private fun metaChanged() { dirty = true; main.removeCallbacks(autosave); main.postDelayed(autosave, 1500) }
 
     private fun open(uri: Uri, name: String?) {
         try {
             scene = ExcalidrawScene.parse(store.read(uri))
+            meta = NoteMeta.readFrom(scene)
+            tool = Tool.entries.firstOrNull { it.key == meta.tool } ?: Tool.PEN
             noteUri = uri
             titleView.text = name ?: NoteStore.displayName(uri.lastPathSegment?.substringAfterLast('/') ?: "Note")
-            sceneView.scene = scene
             undo.clear(); redo.clear(); setSelection(emptySet())
-            sceneView.post { fitToContent() }
+            updateToolButtons(); updateColorViews()
+            surface.post { if (meta.paged) goToPage(0, keepScale = false) else fitContentNow() }
         } catch (e: Exception) {
-            Toast.makeText(this, "Couldn't open: ${e.message}", Toast.LENGTH_LONG).show()
+            toast("Couldn't open: ${e.message}")
             finish()
         }
     }
 
+    private fun fitContentNow() { fitContent(); animator?.end() }
+
     private fun saveNow() {
         if (!dirty) return
         val uri = noteUri ?: return
+        meta.copy(tool = tool.key).writeTo(scene)
         val json = scene.toJson()
         dirty = false
         io.execute {
             try { store.write(uri, json) } catch (e: Exception) {
-                // e.g. a read-only file opened from another app: keep the work as a new note instead.
                 runCatching {
                     val copy = store.create(titleView.text.toString(), json)
-                    runOnUiThread { noteUri = copy.uri; Toast.makeText(this, "Saved a copy to your notes", Toast.LENGTH_LONG).show() }
+                    runOnUiThread { noteUri = copy.uri; toast("Saved a copy to your notes") }
                 }
             }
         }
     }
 
-    private fun fitToContent() {
-        sceneView.viewMatrix.reset()
-        val b = SceneRenderer.contentBounds(scene.elements)
-        if (b == null || sceneView.width == 0) { sceneView.invalidate(); return }
-        b.inset(-40f, -40f)
-        val s = minOf(sceneView.width / b.width(), sceneView.height / b.height(), 1f)
-        sceneView.viewMatrix.postTranslate(-b.left, -b.top)
-        sceneView.viewMatrix.postScale(s, s)
-        sceneView.invalidate()
+    // =============================================================== toolbar & overlays
+
+    private fun iconButton(icon: Icon, desc: String, onClick: (ImageView) -> Unit) = ImageView(this).apply {
+        setImageDrawable(IconDrawable(icon, ui.text))
+        contentDescription = desc
+        setPadding(ui.dpi(9), ui.dpi(9), ui.dpi(9), ui.dpi(9))
+        background = null
+        setOnClickListener { onClick(this) }
+        layoutParams = LinearLayout.LayoutParams(ui.dpi(44), ui.dpi(44)).apply { marginEnd = ui.dpi(2) }
     }
 
-    // ---------------------------------------------------------------- UI
-
-    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun separator() = View(this).apply {
+        setBackgroundColor(ui.divider)
+        layoutParams = LinearLayout.LayoutParams(ui.dpi(1), ui.dpi(28)).apply { setMargins(ui.dpi(8), 0, ui.dpi(8), 0) }
+    }
 
     private fun selectTool(t: Tool) {
-        tool = t
-        toolButtons.forEach { (k, b) -> b.background = if (k == t) chip("#e0dfff") else null }
-        if (t != Tool.SELECT && sceneView.selectedIds.isNotEmpty()) setSelection(emptySet())
+        tool = t; lassoArmed = false
+        if (t != Tool.SELECT && selected.isNotEmpty()) setSelection(emptySet())
+        updateToolButtons(); updateColorViews(); metaChanged()
     }
 
-    private fun chip(c: String) = GradientDrawable().apply { setColor(Color.parseColor(c)); cornerRadius = dp(8).toFloat() }
+    private fun updateToolButtons() {
+        toolButtons.forEach { (k, b) -> b.background = if (k == tool || (k == Tool.SELECT && lassoArmed)) ui.rounded(ui.accentSoft, 10) else null }
+    }
+
+    private fun penTool() = if (tool == Tool.HIGHLIGHTER) Tool.HIGHLIGHTER else Tool.PEN
+
+    private fun NoteMeta.activePenFor(t: Tool) = if (t == Tool.HIGHLIGHTER) highlighter else pen
+
+    private fun setPen(update: (PenConfig) -> PenConfig) {
+        meta = if (penTool() == Tool.HIGHLIGHTER) meta.copy(highlighter = update(meta.highlighter)) else meta.copy(pen = update(meta.pen))
+        if (tool != Tool.PEN && tool != Tool.HIGHLIGHTER) { tool = Tool.PEN; updateToolButtons() }
+        updateColorViews(); metaChanged()
+    }
+
+    private fun useColor(c: String) {
+        colors.use(c)
+        setPen { it.copy(color = c) }
+    }
+
+    private fun updateColorViews() {
+        if (!::colorDot.isInitialized) return
+        val pen = meta.activePenFor(penTool())
+        colorDot.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(ui.sceneColor(SceneRenderer.parseColor(pen.color, Color.BLACK)))
+            setStroke(ui.dpi(2), ui.accent)
+        }
+        recentRow.removeAllViews()
+        colors.list().filter { !it.equals(pen.color, true) }.take(3).forEach { c ->
+            recentRow.addView(View(this).apply {
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    shape = android.graphics.drawable.GradientDrawable.OVAL
+                    setColor(ui.sceneColor(SceneRenderer.parseColor(c, Color.BLACK))); setStroke(ui.dpi(1), ui.divider)
+                }
+                contentDescription = c
+                setOnClickListener { useColor(c) }
+            }, LinearLayout.LayoutParams(ui.dpi(24), ui.dpi(24)).apply { setMargins(ui.dpi(4), 0, ui.dpi(4), 0) })
+        }
+    }
 
     private fun buildToolbar(): View {
         val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(4), 0, dp(8), 0)
+            setPadding(ui.dpi(4), 0, ui.dpi(8), 0)
+            setBackgroundColor(ui.bar)
         }
-        fun button(label: String, onClick: (TextView) -> Unit) = TextView(this).apply {
-            text = label; textSize = 15f; setTextColor(Color.parseColor("#1e1e1e"))
-            setPadding(dp(12), dp(8), dp(12), dp(8)); setOnClickListener { onClick(this) }
-            bar.addView(this, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(2) })
-        }
-        button("‹ Notes") { finish() }
-        titleView = TextView(this).apply { textSize = 16f; setTextColor(Color.BLACK); maxLines = 1; setPadding(dp(4), 0, dp(16), 0) }
+        bar.addView(iconButton(Icon.BACK, "Back to notes") { finish() })
+        titleView = TextView(this).apply { textSize = 16f; setTextColor(ui.text); maxLines = 1; maxWidth = ui.dpi(220); setPadding(ui.dpi(2), 0, ui.dpi(8), 0) }
         bar.addView(titleView)
-        button("Undo") { doUndo() }
-        button("Redo") { doRedo() }
-        button("Fit") { fitToContent() }
-        button("Paste") { pasteFromClipboard() }
-        bar.addView(View(this), LinearLayout.LayoutParams(dp(12), 1))
+        bar.addView(separator())
 
-        for ((t, label) in listOf(Tool.PEN to "Pen", Tool.HIGHLIGHTER to "Highlighter", Tool.SELECT to "Select", Tool.ERASER to "Eraser")) {
-            toolButtons[t] = button(label) { selectTool(t) }
-        }
-        bar.addView(View(this), LinearLayout.LayoutParams(dp(8), 1))
-
-        // Excalidraw's default stroke palette
-        val swatches = mutableListOf<View>()
-        for (c in listOf("#1e1e1e", "#e03131", "#2f9e44", "#1971c2", "#f08c00", "#ffd43b")) {
-            val sw = View(this).apply {
-                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.parseColor(c)); setStroke(dp(1), Color.LTGRAY) }
-                setOnClickListener {
-                    color = c
-                    if (tool == Tool.ERASER || tool == Tool.SELECT && sceneView.selectedIds.isEmpty()) selectTool(Tool.PEN)
-                    swatches.forEach { s -> s.scaleX = 0.7f; s.scaleY = 0.7f }; scaleX = 1f; scaleY = 1f
-                }
-                scaleX = if (c == color) 1f else 0.7f; scaleY = scaleX
+        for ((t, icon, label) in listOf(Triple(Tool.PEN, Icon.PEN, "Pen"), Triple(Tool.HIGHLIGHTER, Icon.HIGHLIGHTER, "Highlighter"), Triple(Tool.ERASER, Icon.ERASER, "Eraser"), Triple(Tool.SELECT, Icon.LASSO, "Lasso select"))) {
+            val b = iconButton(icon, label) {
+                if (tool == t && (t == Tool.PEN || t == Tool.HIGHLIGHTER)) showWidths(it) else selectTool(t)
             }
-            swatches += sw
-            bar.addView(sw, LinearLayout.LayoutParams(dp(30), dp(30)).apply { setMargins(dp(3), 0, dp(3), 0) })
+            toolButtons[t] = b; bar.addView(b)
         }
-        val widths = mutableListOf<TextView>()
-        for ((label, w) in listOf("S" to 1, "M" to 2, "L" to 4)) {
-            widths += button(label) { tv -> strokeWidth = w; widths.forEach { it.alpha = 0.4f }; tv.alpha = 1f }
-                .apply { alpha = if (w == strokeWidth) 1f else 0.4f }
+        bar.addView(separator())
+
+        colorDot = View(this).apply {
+            contentDescription = "Color"
+            setOnClickListener { v -> showColorPopup(v, ui, meta.activePenFor(penTool()).color, colors.list()) { useColor(it) } }
         }
-        selectTool(Tool.PEN)
+        bar.addView(colorDot, LinearLayout.LayoutParams(ui.dpi(30), ui.dpi(30)).apply { setMargins(ui.dpi(6), 0, ui.dpi(4), 0) })
+        recentRow = LinearLayout(this).apply { gravity = Gravity.CENTER_VERTICAL }
+        bar.addView(recentRow)
+        bar.addView(iconButton(Icon.WIDTH, "Thickness") { showWidths(it) })
+        bar.addView(separator())
+
+        bar.addView(iconButton(Icon.PASTE, "Paste image") { pasteFromClipboard() })
+        bar.addView(iconButton(Icon.PDF, "Insert PDF") { pickPdf.launch(arrayOf("application/pdf")) })
+        bar.addView(separator())
+        bar.addView(iconButton(Icon.UNDO, "Undo") { doUndo() })
+        bar.addView(iconButton(Icon.REDO, "Redo") { doRedo() })
+        bar.addView(iconButton(Icon.FIT, "Fit") { showFitMenu(it) })
+        bar.addView(iconButton(Icon.MORE, "More") { showMoreMenu(it) })
+        updateToolButtons(); updateColorViews()
         return HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
+            isHorizontalScrollBarEnabled = false; setBackgroundColor(ui.bar)
             addView(bar, ViewGroup.LayoutParams(-2, -1))
         }
     }
 
+    private fun showWidths(anchor: View) {
+        val pen = meta.activePenFor(penTool())
+        val widths = if (penTool() == Tool.HIGHLIGHTER) listOf(4.0, 6.0, 8.0, 12.0, 16.0, 24.0) else listOf(0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0)
+        showThicknessPopup(anchor, ui, widths, pen.strokeWidth, pen.color, pen.opacity) { w -> setPen { it.copy(strokeWidth = w) } }
+    }
+
+    private fun showFitMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            if (meta.paged) { menu.add("Fit page"); menu.add("Fit width") } else menu.add("Fit drawing")
+            menu.add("Zoom 100%")
+            setOnMenuItemClickListener {
+                when (it.title.toString()) {
+                    "Fit page" -> fitPage(); "Fit width" -> fitWidth(); "Fit drawing" -> fitContent()
+                    "Zoom 100%" -> { val c = toWorld(surface.width / 2f, surface.height / 2f); animateTo(Matrix().apply { setTranslate(surface.width / 2f - c[0], surface.height / 2f - c[1]) }) }
+                }
+                true
+            }
+        }.show()
+    }
+
+    private fun showMoreMenu(anchor: View) {
+        PopupMenu(this, anchor).apply {
+            menu.add(0, 1, 0, "Draw with pen only").apply { isCheckable = true; isChecked = penOnly }
+            val theme = menu.addSubMenu("Dark mode")
+            val cur = Ui.themeSetting(this@EditorActivity)
+            for ((k, l) in listOf("system" to "Follow system", "light" to "Light", "dark" to "Dark")) theme.add(1, 0, 0, l).apply { isCheckable = true; isChecked = cur == k }
+            theme.setGroupCheckable(1, true, true)
+            if (meta.paged) {
+                menu.add("Add page")
+                menu.add(if (meta.direction == PageDirection.VERTICAL) "Scroll pages horizontally" else "Scroll pages vertically")
+                menu.add(if (meta.orientation == PageOrientation.PORTRAIT) "New pages: landscape" else "New pages: portrait")
+            } else menu.add("Add A4 pages to this note")
+            menu.add("Insert PDF…")
+            menu.add("Export as PDF…")
+            setOnMenuItemClickListener {
+                val t = it.title.toString()
+                when {
+                    it.itemId == 1 -> { penOnly = !penOnly; getSharedPreferences("ui", 0).edit().putBoolean("penOnly", penOnly).apply(); toast(if (penOnly) "Fingers navigate, only the pen draws" else "Fingers draw too; use two fingers to navigate") }
+                    t == "Follow system" -> { Ui.setThemeSetting(this@EditorActivity, "system"); saveNow(); recreate() }
+                    t == "Light" -> { Ui.setThemeSetting(this@EditorActivity, "light"); saveNow(); recreate() }
+                    t == "Dark" -> { Ui.setThemeSetting(this@EditorActivity, "dark"); saveNow(); recreate() }
+                    t == "Add page" -> addPage(goTo = true)
+                    t == "Add A4 pages to this note" -> { meta = meta.copy(paged = true); addPage(goTo = true) }
+                    t == "Scroll pages horizontally" -> setDirection(PageDirection.HORIZONTAL)
+                    t == "Scroll pages vertically" -> setDirection(PageDirection.VERTICAL)
+                    t == "New pages: landscape" -> { meta = meta.copy(orientation = PageOrientation.LANDSCAPE); metaChanged() }
+                    t == "New pages: portrait" -> { meta = meta.copy(orientation = PageOrientation.PORTRAIT); metaChanged() }
+                    t == "Insert PDF…" -> pickPdf.launch(arrayOf("application/pdf"))
+                    t == "Export as PDF…" -> exportPdf.launch(titleView.text.toString() + ".pdf")
+                    else -> return@setOnMenuItemClickListener false
+                }
+                true
+            }
+        }.show()
+    }
+
     private fun buildSelectionBar(): View {
-        val bar = LinearLayout(this).apply {
+        selectionBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
-            background = GradientDrawable().apply { setColor(Color.WHITE); cornerRadius = dp(22).toFloat(); setStroke(dp(1), Color.parseColor("#d0d0e0")) }
-            elevation = dp(4).toFloat()
-            setPadding(dp(14), dp(4), dp(6), dp(4))
+            background = ui.rounded(ui.surface, 24, ui.divider); elevation = ui.dp(6)
+            setPadding(ui.dpi(14), ui.dpi(2), ui.dpi(6), ui.dpi(2))
             visibility = View.GONE
         }
-        val count = TextView(this).apply { textSize = 14f; setTextColor(Color.GRAY); setPadding(0, 0, dp(8), 0) }
-        bar.addView(count); bar.tag = count
-        fun action(label: String, onClick: () -> Unit) = bar.addView(TextView(this).apply {
-            text = label; textSize = 15f; setTextColor(Color.parseColor("#6965db"))
-            setPadding(dp(12), dp(8), dp(12), dp(8)); setOnClickListener { onClick() }
+        selectionCount = TextView(this).apply { textSize = 14f; setTextColor(ui.subtext); setPadding(0, 0, ui.dpi(6), 0) }
+        selectionBar.addView(selectionCount)
+        selectionBar.addView(TextView(this).apply {
+            text = "Recolor"; textSize = 14f; setTextColor(ui.accent); setPadding(ui.dpi(10), ui.dpi(10), ui.dpi(10), ui.dpi(10))
+            setOnClickListener { recolorSelection() }
         })
-        action("Recolor") { recolorSelection() }
-        action("Duplicate") { duplicateSelection() }
-        action("Delete") { deleteSelection() }
-        action("Done") { setSelection(emptySet()) }
-        return bar
+        selectionBar.addView(iconButton(Icon.COPY, "Duplicate") { duplicateSelection() })
+        selectionBar.addView(iconButton(Icon.TRASH, "Delete") { deleteSelection() })
+        selectionBar.addView(iconButton(Icon.CHECK, "Done") { setSelection(emptySet()) })
+        return selectionBar
     }
+
+    private fun buildPageNav(): View {
+        pageNav = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = ui.rounded(ui.surface, 24, ui.divider); elevation = ui.dp(6)
+            setPadding(ui.dpi(4), 0, ui.dpi(4), 0)
+            visibility = View.GONE
+        }
+        pageNav.addView(iconButton(Icon.PREV, "Previous page") { goToPage(currentPageIndex() - 1, keepScale = true) })
+        pageLabel = TextView(this).apply {
+            textSize = 14f; setTextColor(ui.text); gravity = Gravity.CENTER; minWidth = ui.dpi(64)
+            setOnClickListener { fitPage() }
+        }
+        pageNav.addView(pageLabel)
+        pageNav.addView(iconButton(Icon.NEXT, "Next page") { goToPage(currentPageIndex() + 1, keepScale = true) })
+        pageNav.addView(iconButton(Icon.PLUS, "Add page") { addPage(goTo = true) })
+        return pageNav
+    }
+
+    private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
     companion object { const val EXTRA_NAME = "name" }
 }
