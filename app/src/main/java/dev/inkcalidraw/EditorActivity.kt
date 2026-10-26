@@ -365,7 +365,10 @@ class EditorActivity : ComponentActivity() {
         main.removeCallbacks(holdForMenu)
         if (isPen(ev.getToolType(idx))) lastPenNear = SystemClock.uptimeMillis()
         when (g) {
-            G.INK -> if (canceled) surface.cancelWet() else commitStroke()
+            G.INK -> if (canceled) surface.cancelWet() else {
+                for (h in 0 until ev.historySize) { val w = toWorld(ev.getHistoricalX(idx, h), ev.getHistoricalY(idx, h)); addSample(w[0], w[1], pressureOf(ev, idx, h)) }
+                commitStroke()
+            }
             G.BUTTON -> if (!canceled) { eraseSnapshot = false; val w = toWorld(ev.getX(idx), ev.getY(idx)); eraseSweep(w, w) }
             G.LASSO -> { if (!canceled) setSelection(elementsInLasso()); lassoArmed = false; updateToolButtons() }
             G.DRAG -> commitDrag(canceled)
