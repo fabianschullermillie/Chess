@@ -91,7 +91,8 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
-          target: google_apis
+          # Plain AOSP image: no Play services, which kept ANR-ing on the CI machine and covering the app.
+          target: default
           arch: x86_64
           profile: pixel_tablet
           cores: 4
@@ -101,6 +102,8 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           # Installed and run by hand (not connectedAndroidTest) so the app isn't uninstalled before we pull screenshots.
           script: |
+            adb shell settings put global hide_error_dialogs 1
+            sleep 20
             adb install -r -g app/build/outputs/apk/debug/app-debug.apk
             adb install -r -g app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
             adb shell am instrument -w -r dev.inkcalidraw.test/androidx.test.runner.AndroidJUnitRunner > instrument.txt || true
