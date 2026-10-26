@@ -62,7 +62,15 @@ class EditorDeviceTest {
 
     private fun launch(uri: Uri): ActivityScenario<EditorActivity> {
         val s = ActivityScenario.launch<EditorActivity>(Intent(ctx, EditorActivity::class.java).setData(uri).putExtra(EditorActivity.EXTRA_FOLDER, store.root().uri.toString()))
-        SystemClock.sleep(1500)
+        // wait for the note to load and the first real frame to be on screen
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < 15_000) {
+            var drawn = 0
+            s.onActivity { a -> drawn = field<CanvasSurface>(a, "surface").framesDrawn }
+            if (drawn > 1) break
+            SystemClock.sleep(100)
+        }
+        SystemClock.sleep(700)
         return s
     }
 
@@ -292,7 +300,7 @@ class EditorDeviceTest {
         val importMs = SystemClock.uptimeMillis() - t0
         val t1 = SystemClock.uptimeMillis()
         val s = launch(note(json, "big"))
-        val openMs = SystemClock.uptimeMillis() - t1 - 1500 // minus launch()'s fixed wait
+        val openMs = SystemClock.uptimeMillis() - t1 - 700 // launch() waits for the first frame, then 700 ms
         shot("12-big-pdf")
         log("big pdf: pages=$n import=${importMs}ms noteSize=${json.length / 1024}KB open≈${openMs}ms")
         assertEquals(300, n)

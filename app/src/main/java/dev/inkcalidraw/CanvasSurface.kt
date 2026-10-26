@@ -73,7 +73,12 @@ class CanvasSurface(context: Context, private val ui: Ui) : SurfaceView(context)
         sceneRenderer.onImageReady = { post { requestRender() } }
         holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(h: SurfaceHolder) {}
-            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) { post { requestRender() } }
+            override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {
+                // The renderer configures its layers in its own surfaceChanged; render once that's done,
+                // and once more a bit later in case the first request raced with that setup.
+                post { requestRender() }
+                postDelayed({ requestRender() }, 120)
+            }
             override fun surfaceDestroyed(h: SurfaceHolder) {}
         })
         renderer = CanvasFrontBufferedRenderer(this, object : CanvasFrontBufferedRenderer.Callback<Wet> {
@@ -160,8 +165,12 @@ class CanvasSurface(context: Context, private val ui: Ui) : SurfaceView(context)
         out.set(x0, y0, x1, y1)
     }
 
+    /** Number of committed-layer frames rendered (used by tests to wait for the first real frame). */
+    @Volatile var framesDrawn = 0; private set
+
     private fun drawFrame(canvas: Canvas) {
         val f = frame ?: run { canvas.drawColor(ui.bg); return }
+        framesDrawn++
         val s = scaleOf(f.matrix)
         canvas.save()
         canvas.concat(f.matrix)

@@ -312,7 +312,8 @@ class EditorActivity : ComponentActivity() {
 
     // =============================================================== input: drawing pointer
 
-    private fun toWorld(sx: Float, sy: Float) = floatArrayOf(sx, sy).also { Matrix().apply { view.invert(this) }.mapPoints(it) }
+    private val inverse = Matrix()
+    private fun toWorld(sx: Float, sy: Float) = floatArrayOf(sx, sy).also { view.invert(inverse); inverse.mapPoints(it) }
 
     private fun drawDown(v: View, ev: MotionEvent, idx: Int, toolType: Int) {
         val sx = ev.getX(idx); val sy = ev.getY(idx)
@@ -479,27 +480,33 @@ class EditorActivity : ComponentActivity() {
 
     private fun eraseAlong(ev: MotionEvent, p: Int) {
         var prev = lastWorld
-        for (h in 0 until ev.historySize) { val w = toWorld(ev.getHistoricalX(p, h), ev.getHistoricalY(p, h)); eraseSweep(prev, w); prev = w }
-        val w = toWorld(ev.getX(p), ev.getY(p)); eraseSweep(prev, w)
+        for (h in 0 until ev.historySize) { val w = toWorld(ev.getHistoricalX(p, h), ev.getHistoricalY(p, h)); eraseSweep(prev, w, redrawNow = false); prev = w }
+        val w = toWorld(ev.getX(p), ev.getY(p)); eraseSweep(prev, w, redrawNow = false)
         eraserCursor = floatArrayOf(ev.getX(p), ev.getY(p), eraserRadiusPx())
         redraw()
     }
 
     /** Deletes every element the eraser circle touched while sweeping from a to b. */
-    private fun eraseSweep(a: FloatArray, b: FloatArray) {
+    private fun eraseSweep(a: FloatArray, b: FloatArray, redrawNow: Boolean = true) {
         lastWorld = b
         val r = (eraserRadiusPx() / scale()).toDouble()
-        var hit = false
-        for (i in scene.elements.indices) {
-            val el = scene.elements[i]
+        val ax = a[0].toDouble(); val ay = a[1].toDouble(); val bx = b[0].toDouble(); val by = b[1].toDouble()
+        var erased: MutableSet<String>? = null
+        val els = scene.elements
+        for (i in els.indices) {
+            val el = els[i]
             if (el.isDeleted || el.locked || el.type == "frame") continue
-            if (Geometry.eraserHits(el, a[0].toDouble(), a[1].toDouble(), b[0].toDouble(), b[1].toDouble(), r)) {
+            if (Geometry.eraserHits(el, ax, ay, bx, by, r)) {
                 if (!eraseSnapshot) { pushUndo(); eraseSnapshot = true }
-                scene.elements[i] = el.withChanges("isDeleted" to JsonPrimitive(true))
-                hit = true
+                els[i] = el.withChanges("isDeleted" to JsonPrimitive(true))
+                (erased ?: HashSet<String>().also { erased = it }).add(el.id)
             }
         }
-        if (hit) { selected = selected - scene.elements.filter { it.isDeleted }.map { it.id }.toSet(); markDirty() }
+        val gone = erased ?: return
+        if (selected.isNotEmpty()) selected = selected - gone
+        noteSync?.local(scene.elements)
+        dirty = true; main.removeCallbacks(autosave); main.postDelayed(autosave, 1500)
+        if (redrawNow) redraw()
     }
 
     // =============================================================== selection
