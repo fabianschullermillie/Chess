@@ -76,16 +76,31 @@ export function InkScene({ text, host }: { text: string; host: SceneHost }) {
       elements: (j.elements as El[]) ?? [],
       files: Object.fromEntries(files.map((f) => [f.id, f])),
       appState: { viewBackgroundColor: (app.viewBackgroundColor as string) ?? "#ffffff", theme: host.dark ? "dark" : "light" },
-      scrollToContent: true,
+      scrollToContent: !((j.elements as El[]) ?? []).some((e) => e.type === "frame"),
     };
   });
+
+  // Paged notes open with the first page fitted to the view (like the tablet app's "fit page")
+  useEffect(() => {
+    if (!api) return;
+    const first = ((original.current.elements as El[]) ?? []).find((e) => e.type === "frame" && !e.isDeleted);
+    if (!first) return;
+    let tries = 0;
+    const t = setInterval(() => {
+      const f = api.getSceneElements().find((e) => e.id === first.id);
+      if (f) api.scrollToContent(f, { fitToViewport: true, viewportZoomFactor: 0.95, animate: false });
+      if (f || ++tries > 40) clearInterval(t);
+    }, 50);
+    return () => clearInterval(t);
+  }, [api]);
 
   // PDF pages under PDF-backed page frames
   useEffect(() => {
     if (!api) return;
     let cancelled = false;
     (async () => {
-      const frames = (api.getSceneElementsIncludingDeleted() as unknown as El[]).filter((e) => pdfPointer(e));
+      // from the file itself: right after mount the API may not have the initial scene yet
+      const frames = (((original.current.elements as El[]) ?? [])).filter((e) => pdfPointer(e));
       if (!frames.length) return;
       const pdfjs = await host.pdfjs();
       const docs = new Map<string, Promise<PdfDoc | null>>();
@@ -114,6 +129,10 @@ export function InkScene({ text, host }: { text: string; host: SceneHost }) {
         } as El);
       }
       if (cancelled || !add.length) return;
+      // never replace a scene that hasn't been loaded yet
+      const want = ((original.current.elements as El[]) ?? []).length;
+      for (let i = 0; i < 100 && api.getSceneElementsIncludingDeleted().length < Math.min(want, 1) && !cancelled; i++) await new Promise((r) => setTimeout(r, 50));
+      if (cancelled) return;
       const cur = api.getSceneElementsIncludingDeleted() as unknown as El[];
       const ids = new Set(cur.map((e) => e.id));
       // backgrounds go to the bottom of the z-order

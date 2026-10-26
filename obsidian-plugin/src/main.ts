@@ -22,8 +22,11 @@ class InkView extends TextFileView {
   getViewData() { return this.text; }
 
   setViewData(data: string, clear: boolean) {
+    // Remount when the file changed outside this view (e.g. git pull), otherwise the next edit would
+    // overwrite it. Our own saves come back identical to this.text and are ignored.
+    const changed = data !== this.text;
     this.text = data;
-    if (clear || !this.root) this.mount();
+    if (clear || !this.root || changed) this.mount();
   }
 
   clear() { this.root?.unmount(); this.root = null; }

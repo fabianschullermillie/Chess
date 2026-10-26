@@ -45,6 +45,7 @@ const note = {
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
 page.on("pageerror", (e) => console.error("PAGEERROR", e.message));
+page.on("console", (m) => m.type() === "warning" || m.type() === "error" ? console.log("CONSOLE", m.text().slice(0, 300)) : 0);
 fs.writeFileSync(OUT + "index.html", `<!doctype html><html><head><meta charset="utf-8"><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div>
 <script>window.__note=${JSON.stringify(JSON.stringify(note))};window.__pdf="${makePdf().toString("base64")}";window.__pdfWorker="./pdf.worker.min.mjs";</script>
 <script src="harness.js"></script></body></html>`.replace("</head>", '<link rel="stylesheet" href="harness.css"></head>'));

@@ -57,6 +57,27 @@ jobs:
             fixtures/*.excalidraw
           if-no-files-found: ignore
 
+
+  obsidian-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build and test the plugin
+        working-directory: obsidian-plugin
+        run: |
+          npm ci --no-audit --no-fund
+          npx tsc --noEmit
+          npm run build
+          npm install --no-save --no-audit --no-fund playwright@1.56.1
+          npx playwright install --with-deps chromium
+          PLAYWRIGHT_PATH=playwright npm test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inkcalidraw-obsidian-${{ github.run_number }}
+          path: obsidian-plugin/dist/
   device-tests:
     # Runs the editor on an Android tablet emulator with synthetic S Pen input and saves screenshots.
     runs-on: ubuntu-latest
