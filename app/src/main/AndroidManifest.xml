@@ -10,15 +10,30 @@
         </activity>
         <activity android:name=".EditorActivity" android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|smallestScreenSize|density">
+            <!-- "Open with" for a single .excalidraw file (file managers, Obsidian, mail, ...) -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
-                <data android:mimeType="application/json" />
                 <data android:mimeType="application/vnd.excalidraw+json" />
+                <data android:mimeType="application/x-excalidraw" />
+                <data android:mimeType="application/json" />
                 <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- file managers that don't send a type: match the extension -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <action android:name="android.intent.action.EDIT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" android:host="*" />
+                <data android:scheme="content" />
+                <data android:pathPattern=".*\\.excalidraw" />
+                <data android:pathPattern=".*\\..*\\.excalidraw" />
+                <data android:pathPattern=".*\\..*\\..*\\.excalidraw" />
             </intent-filter>
         </activity>
         <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.files"

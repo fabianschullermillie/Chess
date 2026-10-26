@@ -119,7 +119,7 @@ class EditorActivity : ComponentActivity() {
         colors = ColorHistory(this)
         penOnly = getSharedPreferences("ui", 0).getBoolean("penOnly", true)
 
-        folder = store.folder(intent.getStringExtra(EXTRA_FOLDER)?.let(Uri::parse))
+        folder = intent.getStringExtra(EXTRA_FOLDER)?.let { store.folder(Uri.parse(it)) } ?: externalFolder(intent?.data) ?: store.root()
         // PDFs annotated by this note live next to it (or in app storage for notes opened from elsewhere).
         pdfs = PdfPages(this) { name -> store.findFile(folder, name) ?: java.io.File(filesDir, "pdfs/$name").takeIf { it.exists() }?.let(Uri::fromFile) }
         surface = CanvasSurface(this, ui)
@@ -157,7 +157,11 @@ class EditorActivity : ComponentActivity() {
         setupDragAndDrop(surface)
 
         val uri = intent?.data ?: store.create(folder).uri
-        open(uri, intent.getStringExtra(EXTRA_NAME))
+        if (intent?.data != null && intent.getStringExtra(EXTRA_FOLDER) == null) {
+            // Opened from another app ("Open with"): keep access if the provider allows it.
+            runCatching { contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+        }
+        open(uri, intent.getStringExtra(EXTRA_NAME) ?: queryName(uri)?.let { NoteStore.displayName(it) })
     }
 
     override fun onResume() { super.onResume(); redraw() }
@@ -883,6 +887,13 @@ class EditorActivity : ComponentActivity() {
         }
     }
 
+    /** For a file opened from elsewhere: its folder, if we can see it (file:// paths), so PDFs next to it resolve. */
+    private fun externalFolder(u: Uri?): androidx.documentfile.provider.DocumentFile? {
+        if (u == null || u.scheme != "file") return null
+        val parent = java.io.File(u.path ?: return null).parentFile ?: return null
+        return androidx.documentfile.provider.DocumentFile.fromFile(parent)
+    }
+
     private fun queryName(u: Uri): String? = runCatching {
         contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
     }.getOrNull()
@@ -1003,9 +1014,10 @@ class EditorActivity : ComponentActivity() {
         io.execute {
             val json = copy.toJson()
             try { store.write(uri, json) } catch (e: Exception) {
+                // The other app shared the file read-only: keep the work as a note instead of losing it.
                 runCatching {
                     val copy = store.create(store.root(), titleView.text.toString(), json)
-                    runOnUiThread { noteUri = copy.uri; toast("Saved a copy to your notes") }
+                    runOnUiThread { noteUri = copy.uri; toast("That file is read-only, so your changes were saved as a copy in Notes") }
                 }
             }
         }

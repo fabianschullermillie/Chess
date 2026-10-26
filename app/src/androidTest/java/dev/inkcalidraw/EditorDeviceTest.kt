@@ -336,6 +336,36 @@ class EditorDeviceTest {
         s.close()
     }
 
+    /** "Open with" from another app: the single file is edited in place. */
+    @Test fun openWithEditsTheSharedFile() {
+        val f = File(ctx.cacheDir, "Shared lecture.excalidraw")
+        f.writeText(ExcalidrawScene.empty().toJson())
+        val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.files", f)
+        for (type in listOf("application/octet-stream", "application/json", "application/vnd.excalidraw+json")) {
+            val handlers = ctx.packageManager.queryIntentActivities(Intent(Intent.ACTION_VIEW).setDataAndType(uri, type), 0)
+            assertTrue("we handle $type", handlers.any { it.activityInfo.name == EditorActivity::class.java.name })
+        }
+        val intent = Intent(Intent.ACTION_EDIT).setDataAndType(uri, "application/octet-stream")
+            .setClass(ctx, EditorActivity::class.java)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+        val s = ActivityScenario.launch<EditorActivity>(intent)
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < 15_000) {
+            var drawn = 0; s.onActivity { a -> drawn = field<CanvasSurface>(a, "surface").framesDrawn }
+            if (drawn > 1) break; SystemClock.sleep(100)
+        }
+        SystemClock.sleep(500)
+        val r = surfaceRect(s)
+        gesture(wave(r, r.exactCenterY()))
+        SystemClock.sleep(400)
+        shot("16-open-with")
+        s.close() // onPause saves
+        SystemClock.sleep(1500)
+        val saved = ExcalidrawScene.parse(f.readText())
+        log("open with: file now has ${saved.elements.count { it.type == "freedraw" }} stroke(s)")
+        assertEquals(1, saved.elements.count { it.type == "freedraw" && !it.isDeleted })
+    }
+
     /** Overview screenshots of the toolbar and its submenus. */
     @Test fun toolbarAndSubmenus() {
         val s = launch(note(Pages.newPagedScene(PageOrientation.LANDSCAPE, PageDirection.HORIZONTAL).toJson(), "toolbar"))
