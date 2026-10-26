@@ -38,6 +38,8 @@ jobs:
           npm run check
 
       - name: Build APK
+        env:
+          SYNC_URL: ${{ vars.SYNC_URL }}
         run: ./gradlew --no-daemon assembleRelease
 
       - name: Upload APK
@@ -113,4 +115,47 @@ jobs:
         with:
           name: device-test-screens-${{ github.run_number }}
           path: device-screens/
+          if-no-files-found: ignore
+
+  sync-tests:
+    # Sync server in the local Workers runtime + the web app, driven by a simulated tablet and two browser tabs.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Install
+        run: |
+          (cd sync && npm install --no-audit --no-fund)
+          (cd web && npm install --no-audit --no-fund)
+          (cd tools/compat && npm install --no-audit --no-fund && npx playwright install --with-deps chromium)
+      - name: Typecheck
+        run: (cd sync && npx tsc --noEmit) && (cd web && npx tsc --noEmit)
+      - name: Start sync server and web app
+        run: |
+          cd sync
+          printf 'TOKEN_SECRET=ci-secret\nDEV_LOGIN=1\nGITHUB_CLIENT_ID=x\nGITHUB_CLIENT_SECRET=x\n' > .dev.vars
+          nohup npx wrangler dev --local --port 8787 > ../wrangler.log 2>&1 &
+          cd ../web && VITE_SYNC_URL=http://127.0.0.1:8787 npx vite build && (nohup npx vite preview --port 5173 --host 127.0.0.1 > ../vite.log 2>&1 &)
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/ && curl -sf http://127.0.0.1:5173/ > /dev/null && break; sleep 1; done
+      - name: Protocol and server tests
+        run: cd sync && node --experimental-strip-types --no-warnings test/e2e.mjs
+      - name: Live sync between tablet client and browser tabs
+        run: cd sync && mkdir -p ../web-shots && SHOTS=../web-shots node --experimental-strip-types --no-warnings test/web-e2e.mjs
+      - name: Kotlin client against the server
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - run: ./gradlew --no-daemon testDebugUnitTest --tests '*SyncProtocolTest*'
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: sync-test-${{ github.run_number }}
+          path: |
+            web-shots/
+            wrangler.log
           if-no-files-found: ignore

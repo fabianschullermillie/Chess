@@ -1,0 +1,30 @@
+name: Deploy sync server (Cloudflare)
+
+on:
+  push:
+    branches: [inkcalidraw]
+    paths: ["sync/**", ".github/workflows/deploy-sync.yml"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Runs once the Cloudflare token has been added as a repository secret.
+    if: ${{ vars.SYNC_DEPLOY == 'true' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Deploy worker
+        working-directory: sync
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          npm install --no-audit --no-fund
+          npx wrangler r2 bucket create inkcalidraw-files || true
+          npx wrangler deploy --var ALLOWED_USERS:"${{ vars.ALLOWED_USERS }}" --var WEB_ORIGIN:"${{ vars.WEB_ORIGIN }}"
+          printf '%s' "${{ secrets.OAUTH_CLIENT_ID }}" | npx wrangler secret put GITHUB_CLIENT_ID
+          printf '%s' "${{ secrets.OAUTH_CLIENT_SECRET }}" | npx wrangler secret put GITHUB_CLIENT_SECRET
+          printf '%s' "${{ secrets.SYNC_TOKEN_SECRET }}" | npx wrangler secret put TOKEN_SECRET
