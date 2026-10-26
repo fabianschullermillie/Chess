@@ -236,12 +236,15 @@ class EditorActivity : ComponentActivity() {
     private fun draws(t: Int) = isPen(t) || (!penOnly && t == MotionEvent.TOOL_TYPE_FINGER)
 
     /** Main-thread time spent handling touch events (read by the device tests). */
-    @Volatile var touchNanos = 0L
+    @Volatile var touchNanos = 0L      // wall time
+    @Volatile var touchCpuNanos = 0L   // main-thread CPU time (excludes time the emulator/OS gave other threads)
     @Volatile var touchEvents = 0
 
     private fun onTouch(v: View, ev: MotionEvent) {
-        val t0 = System.nanoTime()
-        try { handleTouch(v, ev) } finally { touchNanos += System.nanoTime() - t0; touchEvents++ }
+        val t0 = System.nanoTime(); val c0 = android.os.Debug.threadCpuTimeNanos()
+        try { handleTouch(v, ev) } finally {
+            touchNanos += System.nanoTime() - t0; touchCpuNanos += android.os.Debug.threadCpuTimeNanos() - c0; touchEvents++
+        }
     }
 
     private fun handleTouch(v: View, ev: MotionEvent) {
