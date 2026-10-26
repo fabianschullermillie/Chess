@@ -1,5 +1,7 @@
 /** Talks to the Cloudflare sync server. */
-export const SYNC_URL: string = (import.meta.env.VITE_SYNC_URL as string | undefined) ?? "http://127.0.0.1:8787";
+/** Server address: built in at deploy time, or entered once on the sign-in page (kept in this browser). */
+export const SYNC_URL: string = (localStorage.getItem("syncUrl") || (import.meta.env.VITE_SYNC_URL as string | undefined) || "").replace(/\/$/, "");
+export function setSyncUrl(u: string) { localStorage.setItem("syncUrl", u.trim().replace(/\/$/, "")); location.reload(); }
 
 export function token(): string | null {
   const m = location.hash.match(/token=([^&]+)/);

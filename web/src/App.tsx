@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { login, token } from "./api";
+import { login, setSyncUrl, SYNC_URL, token } from "./api";
 import { Library } from "./Library";
 import { Editor } from "./Editor";
 
@@ -14,7 +14,12 @@ export function App() {
       <div style={{ textAlign: "center" }}>
         <h1 style={{ fontWeight: 600 }}>Inkcalidraw</h1>
         <p style={{ color: "#6b6b75" }}>Your notes from the tablet, live in the browser.</p>
-        <button onClick={login} style={btn}>Sign in with GitHub</button>
+        {SYNC_URL
+          ? <button onClick={login} style={btn}>Sign in with GitHub</button>
+          : <form onSubmit={(e) => { e.preventDefault(); setSyncUrl(new FormData(e.currentTarget).get("u") as string); }}>
+              <input name="u" placeholder="https://inkcalidraw-sync.<you>.workers.dev" style={{ padding: 10, width: 320, borderRadius: 18, border: "1px solid #ddd" }} />
+              <button style={{ ...btn, marginLeft: 8 }}>Use server</button>
+            </form>}
       </div>
     </div>
   );
