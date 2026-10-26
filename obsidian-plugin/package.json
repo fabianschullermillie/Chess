@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-inkcalidraw",
+  "version": "0.1.0",
+  "private": true,
+  "description": "View and edit Inkcalidraw .excalidraw notes (including PDF annotations) in Obsidian",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node test/harness-test.mjs"
+  },
+  "dependencies": {
+    "@excalidraw/excalidraw": "0.18.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "esbuild": "^0.25.0",
+    "obsidian": "^1.8.7",
+    "pdfjs-dist": "^4.10.38",
+    "typescript": "^5.6.0"
+  }
+}
