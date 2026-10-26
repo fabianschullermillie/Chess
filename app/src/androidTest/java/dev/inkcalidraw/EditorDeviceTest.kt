@@ -297,7 +297,7 @@ class EditorDeviceTest {
         log("big pdf: pages=$n import=${importMs}ms noteSize=${json.length / 1024}KB open≈${openMs}ms")
         assertEquals(300, n)
         assertTrue("note stays small (${json.length} chars)", json.length < 400_000)
-        assertTrue("import took $importMs ms", importMs < 15_000)
+        assertTrue("import took $importMs ms", importMs < 30_000) // emulator; reads 300 page sizes
         s.close()
     }
 

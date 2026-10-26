@@ -106,6 +106,9 @@ jobs:
             adb shell am instrument -w -r dev.inkcalidraw.test/androidx.test.runner.AndroidJUnitRunner > instrument.txt || true
             mkdir -p device-screens && adb pull /sdcard/Android/data/dev.inkcalidraw/files/screens device-screens/ || true
             cp instrument.txt device-screens/ || true
+            adb logcat -d -v time > device-screens/logcat.txt || true
+            adb shell 'ls /data/anr' > device-screens/anr-list.txt 2>&1 || true
+            adb shell 'cat /data/anr/anr_* 2>/dev/null | head -400' > device-screens/anr-traces.txt 2>&1 || true
             grep -E "^(OK|FAILURES|Tests run)" instrument.txt || true
             grep -q "^OK (" instrument.txt
 
