@@ -1,7 +1,0 @@
-{
-  "compilerOptions": {
-    "target": "es2022", "module": "esnext", "moduleResolution": "bundler", "lib": ["es2022", "dom", "dom.iterable"],
-    "jsx": "react-jsx", "strict": true, "skipLibCheck": true, "noEmit": true, "allowImportingTsExtensions": true, "types": ["vite/client"]
-  },
-  "include": ["src", "../sync/src/protocol.ts"]
-}

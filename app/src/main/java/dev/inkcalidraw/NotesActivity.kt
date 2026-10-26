@@ -76,7 +76,6 @@ class NotesActivity : ComponentActivity() {
             }, LinearLayout.LayoutParams(0, -2, 1f))
             val buttons = LinearLayout(context).apply {
                 gravity = Gravity.CENTER_VERTICAL
-                addView(pill(Icon.EXPORT, "Cloud") { cloudDialog() })
                 addView(pill(Icon.MOON, "Theme") { chooseTheme() })
                 addView(pill(Icon.FOLDER, "Storage") { chooseRoot() })
                 addView(pill(Icon.FOLDER_PLUS, "Folder") { newFolder() })
@@ -224,119 +223,6 @@ class NotesActivity : ComponentActivity() {
     private fun queryName(u: Uri): String? = runCatching {
         contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
     }.getOrNull() ?: u.lastPathSegment?.substringAfterLast('/')
-
-    // ------------------------------------------------------------------ cloud sync
-
-    private fun cloudDialog() {
-        val account = SyncAccount(this)
-        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(ui.dpi(20), ui.dpi(8), ui.dpi(20), 0) }
-        val url = EditText(this).apply { hint = "https://inkcalidraw-sync.<you>.workers.dev"; setText(account.url); isSingleLine = true }
-        box.addView(TextView(this).apply { text = "Sync server"; setTextColor(ui.subtext) })
-        box.addView(url)
-        box.addView(TextView(this).apply {
-            text = if (account.signedIn) "Signed in as ${account.login}. Open notes sync live with the web app." else "Not signed in."
-            setTextColor(ui.text); setPadding(0, ui.dpi(12), 0, 0)
-        })
-        val d = AlertDialog.Builder(this).setTitle("Cloud sync").setView(box)
-            .setPositiveButton(if (account.signedIn) "Download notes…" else "Sign in with GitHub") { _, _ ->
-                account.url = url.text.toString()
-                if (account.signedIn) downloadFromCloud(account) else signIn(account)
-            }
-            .setNegativeButton("Close") { _, _ -> account.url = url.text.toString() }
-        if (account.signedIn) d.setNeutralButton("Sign out") { _, _ -> account.signOut(); toast("Signed out") }
-        d.show()
-    }
-
-    /** GitHub device flow: show a code, open github.com/login/device, poll until confirmed. */
-    private fun signIn(account: SyncAccount) {
-        if (account.url.isBlank()) { toast("Enter the sync server address first"); return }
-        val api = SyncApi(account)
-        io.execute {
-            val start = runCatching { api.deviceStart() }.getOrElse { e -> runOnUiThread { toast("Can't reach server: ${e.message}") }; return@execute }
-            val code = (start["user_code"] as? JsonPrimitive)?.content
-            val verify = (start["verification_uri"] as? JsonPrimitive)?.content ?: "https://github.com/login/device"
-            val device = (start["device_code"] as? JsonPrimitive)?.content
-            if (code == null || device == null) { runOnUiThread { toast("Sign-in failed: $start") }; return@execute }
-            var waiting = true
-            runOnUiThread {
-                getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("code", code))
-                AlertDialog.Builder(this).setTitle("Sign in with GitHub")
-                    .setMessage("Enter this code on GitHub (it's on your clipboard):\n\n$code")
-                    .setPositiveButton("Open GitHub") { _, _ -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(verify))) }
-                    .setNegativeButton("Cancel") { _, _ -> waiting = false }.show()
-            }
-            var interval = ((start["interval"] as? JsonPrimitive)?.content?.toLongOrNull() ?: 5L) * 1000
-            while (waiting) {
-                Thread.sleep(interval)
-                val r = runCatching { api.devicePoll(device) }.getOrNull() ?: continue
-                val token = (r["token"] as? JsonPrimitive)?.content
-                if (token != null) {
-                    account.token = token; account.login = (r["login"] as? JsonPrimitive)?.content
-                    runOnUiThread { toast("Signed in as ${account.login}") }
-                    break
-                }
-                (r["error"] as? JsonPrimitive)?.content?.let { err ->
-                    if (err == "slow_down") interval += 5000
-                    else if (err != "authorization_pending") { runOnUiThread { toast("Sign-in failed: $err") }; break }
-                }
-            }
-        }
-    }
-
-    /** Notes that exist in the cloud (e.g. created on the web) but not on this device. */
-    private fun downloadFromCloud(account: SyncAccount) {
-        val api = SyncApi(account)
-        val folder = current
-        io.execute {
-            val remote = runCatching { api.notes() }.getOrElse { e -> runOnUiThread { toast("Couldn't list cloud notes: ${e.message}") }; return@execute }
-            val local = runCatching { allSyncIds() }.getOrDefault(emptySet())
-            val missing = remote.filter { (it["id"] as JsonPrimitive).content !in local }
-            runOnUiThread {
-                if (missing.isEmpty()) { toast("Everything in the cloud is already on this tablet"); return@runOnUiThread }
-                val names = missing.map { n -> ((n["folder"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }?.let { "$it/" } ?: "") + (n["name"] as JsonPrimitive).content }
-                val checked = BooleanArray(missing.size) { true }
-                AlertDialog.Builder(this).setTitle("Download into “${folder.name ?: "Notes"}”")
-                    .setMultiChoiceItems(names.toTypedArray(), checked) { _, i, v -> checked[i] = v }
-                    .setPositiveButton("Download") { _, _ ->
-                        io.execute {
-                            var ok = 0
-                            missing.forEachIndexed { i, n -> if (checked[i]) runCatching { downloadNote(api, folder, n); ok++ } }
-                            runOnUiThread { toast("Downloaded $ok note(s)"); reload() }
-                        }
-                    }.setNegativeButton("Cancel", null).show()
-            }
-        }
-    }
-
-    private fun downloadNote(api: SyncApi, folder: DocumentFile, info: kotlinx.serialization.json.JsonObject) {
-        val id = (info["id"] as JsonPrimitive).content
-        val snap = api.snapshot(id)
-        val scene = ExcalidrawScene.empty()
-        for (e in snap["elements"] as kotlinx.serialization.json.JsonArray) {
-            val el = Element(e as kotlinx.serialization.json.JsonObject)
-            if (el.customData?.get("ephemeral") == null) scene.elements.add(el)
-        }
-        val meta = snap["meta"] as? kotlinx.serialization.json.JsonObject
-        (meta?.get("files") as? kotlinx.serialization.json.JsonObject)?.forEach { (fid, f) ->
-            f as kotlinx.serialization.json.JsonObject
-            val sha = (f["sha"] as JsonPrimitive).content; val mime = (f["mimeType"] as? JsonPrimitive)?.content ?: "image/png"
-            scene.addFile(fid, mime, "data:$mime;base64," + android.util.Base64.encodeToString(api.getFile(sha), android.util.Base64.NO_WRAP))
-        }
-        // PDFs the note annotates go next to it, under the name its pages point to.
-        ((meta?.get("inkcalidraw") as? kotlinx.serialization.json.JsonObject)?.get("pdfs") as? kotlinx.serialization.json.JsonObject)?.forEach { (name, sha) ->
-            if (store.findFile(folder, name) == null) {
-                val f = folder.createFile(NoteStore.MIME, name) ?: return@forEach
-                contentResolver.openOutputStream(f.uri, "wt")!!.use { it.write(api.getFile((sha as JsonPrimitive).content)) }
-            }
-        }
-        scene.appData = kotlinx.serialization.json.JsonObject(scene.appData + ("syncId" to JsonPrimitive(id)))
-        NoteMeta.readFrom(scene).writeTo(scene)
-        store.create(folder, (info["name"] as JsonPrimitive).content, scene.toJson())
-    }
-
-    private fun allSyncIds(): Set<String> = store.allFolders().flatMap { (_, f) -> store.list(f).notes }.mapNotNull { n ->
-        runCatching { (ExcalidrawScene.parse(store.read(n.uri)).appData["syncId"] as? JsonPrimitive)?.content }.getOrNull()
-    }.toSet()
 
     private fun chooseTheme() {
         val keys = listOf("system", "light", "dark")

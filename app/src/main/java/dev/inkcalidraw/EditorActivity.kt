@@ -57,9 +57,7 @@ class EditorActivity : ComponentActivity() {
     private lateinit var pdfs: PdfPages
     private lateinit var folder: androidx.documentfile.provider.DocumentFile
     private var fullscreen = false
-    private lateinit var account: SyncAccount
-    private var noteSync: NoteSync? = null
-    private lateinit var syncStatus: TextView
+
     private val toolButtons = mutableMapOf<Tool, ImageView>()
 
     private var scene = ExcalidrawScene.empty()
@@ -119,7 +117,6 @@ class EditorActivity : ComponentActivity() {
         ui = Ui.of(this)
         store = NoteStore(this)
         colors = ColorHistory(this)
-        account = SyncAccount(this)
         penOnly = getSharedPreferences("ui", 0).getBoolean("penOnly", true)
 
         folder = store.folder(intent.getStringExtra(EXTRA_FOLDER)?.let(Uri::parse))
@@ -171,7 +168,7 @@ class EditorActivity : ComponentActivity() {
         saveNow()
     }
 
-    override fun onDestroy() { noteSync?.close(); surface.release(); pdfs.close(); super.onDestroy() }
+    override fun onDestroy() { surface.release(); pdfs.close(); super.onDestroy() }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
@@ -507,7 +504,6 @@ class EditorActivity : ComponentActivity() {
         }
         val gone = erased ?: return
         if (selected.isNotEmpty()) selected = selected - gone
-        noteSync?.local(scene.elements)
         dirty = true; main.removeCallbacks(autosave); main.postDelayed(autosave, 1500)
         if (redrawNow) redraw()
     }
@@ -855,7 +851,6 @@ class EditorActivity : ComponentActivity() {
                     scene.elements.add(el)
                     setSelection(setOf(el.id))
                     markDirty()
-                    resyncAttachments()
                 }
             } catch (e: Exception) {
                 runOnUiThread { toast("Couldn't insert image: ${e.message}") }
@@ -880,7 +875,6 @@ class EditorActivity : ComponentActivity() {
                     meta = meta.copy(paged = true)
                     markDirty()
                     toast("Added $n page${if (n == 1) "" else "s"}")
-                    resyncAttachments()
                     main.post { goToPage(firstNew, keepScale = false) }
                 }
             } catch (e: Exception) {
@@ -962,7 +956,6 @@ class EditorActivity : ComponentActivity() {
 
     /** Scene changed: schedule autosave and redraw. */
     private fun markDirty() {
-        noteSync?.local(scene.elements)
         dirty = true
         main.removeCallbacks(autosave)
         main.postDelayed(autosave, 1500)
@@ -993,7 +986,6 @@ class EditorActivity : ComponentActivity() {
             undo.clear(); redo.clear(); setSelection(emptySet())
             updateToolButtons(); updateColorViews()
             surface.post { if (meta.paged) goToPage(0, keepScale = false) else fitContentNow() }
-            startSync()
         } catch (e: Exception) {
             toast("Couldn't open: ${e.message}")
             finish()
@@ -1016,96 +1008,6 @@ class EditorActivity : ComponentActivity() {
                     runOnUiThread { noteUri = copy.uri; toast("Saved a copy to your notes") }
                 }
             }
-        }
-    }
-
-    // =============================================================== cloud sync
-
-    private fun startSync() {
-        if (!account.signedIn) { syncStatus.visibility = View.GONE; return }
-        val app = scene.appData
-        val syncId = (app["syncId"] as? JsonPrimitive)?.content ?: java.util.UUID.randomUUID().toString().replace("-", "").take(20).also {
-            scene.appData = kotlinx.serialization.json.JsonObject(app + ("syncId" to JsonPrimitive(it))); metaChanged()
-        }
-        syncStatus.visibility = View.VISIBLE
-        // Full hello on open (one compressed download), deltas from then on and on every reconnect.
-        noteSync = NoteSync(account, syncId, 0, { els, m -> onRemote(els, m) }, { st ->
-            syncStatus.text = "● $st"
-            syncStatus.setTextColor(Color.parseColor(when (st) { "live" -> "#2f9e44"; "connecting" -> "#f08c00"; else -> "#e03131" }))
-        })
-        noteSync?.local(scene.elements)
-        val name = titleView.text.toString()
-        val folderPath = intent.getStringExtra(EXTRA_FOLDER_PATH) ?: ""
-        val snapshot = scene.copyForSave()
-        io.execute { runCatching { uploadAttachments(SyncApi(account), syncId, name, folderPath, snapshot) } }
-    }
-
-    /** Uploads images and PDFs the server doesn't have yet (content-addressed) and announces them. */
-    private fun uploadAttachments(api: SyncApi, syncId: String, name: String, folderPath: String, s: ExcalidrawScene) {
-        api.putNote(syncId, name, folderPath)
-        val files = HashMap<String, kotlinx.serialization.json.JsonElement>()
-        for ((id, f) in s.files) {
-            val mime = (f["mimeType"] as? JsonPrimitive)?.content ?: "image/png"
-            val dataUrl = (f["dataURL"] as? JsonPrimitive)?.content ?: continue
-            val bytes = android.util.Base64.decode(dataUrl.substringAfter("base64,"), android.util.Base64.DEFAULT)
-            val sha = sha1(bytes)
-            if (!api.hasFile(sha)) api.putFile(sha, mime, bytes)
-            files[id] = kotlinx.serialization.json.buildJsonObject { put("mimeType", JsonPrimitive(mime)); put("sha", JsonPrimitive(sha)) }
-        }
-        val pdfShas = HashMap<String, kotlinx.serialization.json.JsonElement>()
-        for (name2 in s.elements.mapNotNull { it.pdfFile }.toSet()) {
-            val uri = store.findFile(folder, name2) ?: continue
-            val bytes = contentResolver.openInputStream(uri)!!.use { it.readBytes() }
-            val sha = sha1(bytes)
-            if (!api.hasFile(sha)) api.putFile(sha, "application/pdf", bytes)
-            pdfShas[name2] = JsonPrimitive(sha)
-        }
-        val m = kotlinx.serialization.json.buildJsonObject {
-            put("files", kotlinx.serialization.json.JsonObject(files))
-            put("inkcalidraw", kotlinx.serialization.json.buildJsonObject { put("pdfs", kotlinx.serialization.json.JsonObject(pdfShas)) })
-        }
-        runOnUiThread { noteSync?.meta(m) }
-    }
-
-    private fun resyncAttachments() {
-        if (noteSync == null) return
-        val sid = (scene.appData["syncId"] as? JsonPrimitive)?.content ?: return
-        val name = titleView.text.toString(); val path = intent.getStringExtra(EXTRA_FOLDER_PATH) ?: ""
-        val snapshot = scene.copyForSave()
-        io.execute { runCatching { uploadAttachments(SyncApi(account), sid, name, path, snapshot) } }
-    }
-
-    private fun sha1(b: ByteArray) = java.security.MessageDigest.getInstance("SHA-1").digest(b).joinToString("") { "%02x".format(it) }
-
-    /** Changes from the web or another device. */
-    private fun onRemote(changed: List<kotlinx.serialization.json.JsonObject>, m: kotlinx.serialization.json.JsonObject?) {
-        var touched = false
-        if (changed.isNotEmpty()) {
-            val pos = HashMap<String, Int>(scene.elements.size * 2)
-            scene.elements.forEachIndexed { i, e -> pos[e.id] = i }
-            for (j in changed) {
-                val id = SyncProtocol.id(j)
-                val i = pos[id]
-                if (i == null) { scene.elements.add(Element(j)); pos[id] = scene.elements.size - 1; touched = true }
-                else if (SyncProtocol.wins(SyncProtocol.version(j), SyncProtocol.nonce(j), scene.elements[i].json)) { scene.elements[i] = Element(j); touched = true }
-            }
-        }
-        // Images added on the web: fetch the ones we don't have.
-        val missing = (m?.get("files") as? kotlinx.serialization.json.JsonObject)?.filterKeys { it !in scene.files } ?: emptyMap()
-        if (missing.isNotEmpty()) {
-            val api = SyncApi(account)
-            io.execute {
-                for ((id, f) in missing) runCatching {
-                    f as kotlinx.serialization.json.JsonObject
-                    val sha = (f["sha"] as JsonPrimitive).content; val mime = (f["mimeType"] as? JsonPrimitive)?.content ?: "image/png"
-                    val data = "data:$mime;base64," + android.util.Base64.encodeToString(api.getFile(sha), android.util.Base64.NO_WRAP)
-                    runOnUiThread { scene.addFile(id, mime, data); dirty = true; redraw() }
-                }
-            }
-        }
-        if (touched) {
-            dirty = true; main.removeCallbacks(autosave); main.postDelayed(autosave, 1500)
-            redraw()
         }
     }
 
@@ -1200,8 +1102,6 @@ class EditorActivity : ComponentActivity() {
             setOnClickListener { renameNote() }
         }
         bar.addView(titleView, LinearLayout.LayoutParams(0, -2, 1f))
-        syncStatus = TextView(this).apply { textSize = 13f; setPadding(ui.dpi(8), 0, ui.dpi(8), 0); visibility = View.GONE }
-        bar.addView(syncStatus)
         bar.addView(iconButton(Icon.PAGES, "Add page") { if (!meta.paged) meta = meta.copy(paged = true); addPage(goTo = true) })
         bar.addView(iconButton(Icon.FIT, "Fit") { showFitMenu(it) })
         bar.addView(iconButton(Icon.PDF, "Insert PDF") { pickPdf.launch(arrayOf("application/pdf")) })
@@ -1254,8 +1154,6 @@ class EditorActivity : ComponentActivity() {
                 val newName = input.text.toString()
                 io.execute {
                     val nu = runCatching { store.rename(uri, folder, newName) }.getOrNull()
-                    val sid = (scene.appData["syncId"] as? JsonPrimitive)?.content
-                    if (nu != null && sid != null && account.signedIn) runCatching { SyncApi(account).putNote(sid, newName.trim(), intent.getStringExtra(EXTRA_FOLDER_PATH) ?: "") }
                     runOnUiThread { if (nu != null) { noteUri = nu; titleView.text = newName.trim() } else toast("Rename failed") }
                 }
             }.setNegativeButton("Cancel", null).show()
