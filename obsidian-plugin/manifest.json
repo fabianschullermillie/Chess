@@ -1,7 +1,7 @@
 {
   "id": "inkcalidraw",
   "name": "Inkcalidraw",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "minAppVersion": "1.5.0",
   "description": "Open .excalidraw notes from the Inkcalidraw tablet app, with annotated PDF pages shown under your ink.",
   "author": "Fabian Schuller",

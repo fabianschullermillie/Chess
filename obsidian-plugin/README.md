@@ -12,6 +12,8 @@ Opens `.excalidraw` notes from the Inkcalidraw tablet app in Obsidian (desktop a
 2. Unzip it into `<your vault>/.obsidian/plugins/inkcalidraw/`. That folder should then contain `main.js`, `manifest.json` and `styles.css`.
 3. In Obsidian, go to Settings → Community plugins, then enable **Inkcalidraw**.
 
+**Opening drawings:** with the Excalidraw plugin disabled, `.excalidraw` files and the Excalidraw plugin's own `.excalidraw.md` drawings open in Inkcalidraw automatically. Support for `.excalidraw.md` is basic: drawing, text and images work; nothing beyond that. You can also open a drawing from the pen icon in the ribbon, the command "Open a drawing…", or **Open in Inkcalidraw** in any drawing's file menu. "Open as Markdown" in the view's menu shows a `.excalidraw.md` note's text.
+
 **Excalidraw plugin conflict:** if the Excalidraw plugin is also installed, it keeps the `.excalidraw` extension. In that case, right-click a note and choose **Open in Inkcalidraw**, or use the command "Open current .excalidraw file in Inkcalidraw". The setting "Open .excalidraw files with Inkcalidraw" turns off claiming the extension.
 
 ## Build and test

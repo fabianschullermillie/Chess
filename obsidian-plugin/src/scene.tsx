@@ -22,6 +22,8 @@ export interface SceneHost {
   /** pdf.js (Obsidian ships it: loadPdfJs()). */
   pdfjs(): Promise<{ getDocument(src: { data: Uint8Array }): { promise: Promise<PdfDoc> } }>;
   save(json: string): void;
+  /** Images stored outside the JSON (".excalidraw.md" notes keep them as vault files). */
+  loadFiles?(): Promise<{ id: string; mimeType: string; dataURL: string }[]>;
   dark: boolean;
 }
 type PdfDoc = { numPages: number; getPage(n: number): Promise<{ getViewport(o: { scale: number }): { width: number; height: number }; render(o: unknown): { promise: Promise<void> } }> };
@@ -79,6 +81,13 @@ export function InkScene({ text, host }: { text: string; host: SceneHost }) {
       scrollToContent: !((j.elements as El[]) ?? []).some((e) => e.type === "frame"),
     };
   });
+
+  // Images kept as separate vault files
+  useEffect(() => {
+    if (!api || !host.loadFiles) return;
+    host.loadFiles().then((fs) => { if (fs.length) api.addFiles(fs.map((f) => ({ ...f, created: Date.now() })) as never); })
+      .catch((e) => console.warn("Inkcalidraw: images", e));
+  }, [api]);
 
   // Paged notes open with the first page fitted to the view (like the tablet app's "fit page")
   useEffect(() => {
