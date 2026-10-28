@@ -366,8 +366,11 @@ class EditorDeviceTest {
         assertEquals(1, saved.elements.count { it.type == "freedraw" && !it.isDeleted })
     }
 
-    private fun sh(cmd: String): String = auto.executeShellCommand(cmd).let { pfd ->
-        ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.readBytes().toString(Charsets.UTF_8) }
+    /** Runs [cmd] in a real shell (executeShellCommand alone splits on spaces and ignores quotes). */
+    private fun sh(cmd: String): String {
+        val (out, input) = auto.executeShellCommandRw("sh")
+        ParcelFileDescriptor.AutoCloseOutputStream(input).use { it.write("$cmd\nexit\n".toByteArray()) }
+        return ParcelFileDescriptor.AutoCloseInputStream(out).use { it.readBytes().toString(Charsets.UTF_8) }
     }
 
     private fun clickText(vararg labels: String, timeout: Long = 5000): Boolean {
@@ -383,7 +386,7 @@ class EditorDeviceTest {
     @Test fun obsidianLinkEditsVaultFileInPlace() {
         val tmp = File(ctx.getExternalFilesDir(null), "Week 3.excalidraw").apply { writeText(ExcalidrawScene.empty().toJson()) }
         val vaultFile = "/sdcard/Documents/Uni/Lectures/Week 3.excalidraw"
-        sh("mkdir -p /sdcard/Documents/Uni/Lectures"); sh("cp '${tmp.absolutePath}' '$vaultFile'")
+        sh("mkdir -p /sdcard/Documents/Uni/Lectures && cat '${tmp.absolutePath}' > '$vaultFile'")
         assertTrue("vault file prepared", sh("ls '/sdcard/Documents/Uni/Lectures/'").contains("Week 3.excalidraw"))
         val link = Uri.parse("inkcalidraw://open?vault=Uni&path=" + Uri.encode("Lectures/Week 3.excalidraw") + "&abs=" + Uri.encode("/storage/emulated/0/Documents/Uni"))
         val view = Intent(Intent.ACTION_VIEW, link).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
