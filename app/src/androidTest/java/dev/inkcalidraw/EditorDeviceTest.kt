@@ -366,6 +366,65 @@ class EditorDeviceTest {
         assertEquals(1, saved.elements.count { it.type == "freedraw" && !it.isDeleted })
     }
 
+    private fun sh(cmd: String): String = auto.executeShellCommand(cmd).let { pfd ->
+        ParcelFileDescriptor.AutoCloseInputStream(pfd).use { it.readBytes().toString(Charsets.UTF_8) }
+    }
+
+    private fun clickText(vararg labels: String, timeout: Long = 5000): Boolean {
+        val re = java.util.regex.Pattern.compile("(?i)(" + labels.joinToString("|") { java.util.regex.Pattern.quote(it) } + ")")
+        val o = device.wait(Until.findObject(By.text(re)), timeout) ?: return false
+        o.click(); return true
+    }
+
+    /**
+     * The Obsidian plugin's "Edit in Inkcalidraw app": inkcalidraw://open?vault=…&path=… opens the vault file in
+     * place. First time: the user grants the vault folder in Android's folder picker; afterwards it opens directly.
+     */
+    @Test fun obsidianLinkEditsVaultFileInPlace() {
+        val tmp = File(ctx.getExternalFilesDir(null), "Week 3.excalidraw").apply { writeText(ExcalidrawScene.empty().toJson()) }
+        val vaultFile = "/sdcard/Documents/Uni/Lectures/Week 3.excalidraw"
+        sh("mkdir -p /sdcard/Documents/Uni/Lectures"); sh("cp '${tmp.absolutePath}' '$vaultFile'")
+        assertTrue("vault file prepared", sh("ls '/sdcard/Documents/Uni/Lectures/'").contains("Week 3.excalidraw"))
+        val link = Uri.parse("inkcalidraw://open?vault=Uni&path=" + Uri.encode("Lectures/Week 3.excalidraw") + "&abs=" + Uri.encode("/storage/emulated/0/Documents/Uni"))
+        val view = Intent(Intent.ACTION_VIEW, link).addCategory(Intent.CATEGORY_BROWSABLE).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        assertTrue("link handled by the app", ctx.packageManager.queryIntentActivities(view, 0).any { it.activityInfo.name == OpenLinkActivity::class.java.name })
+
+        ctx.startActivity(view)
+        assertNotNull("asks for the vault folder", device.wait(Until.findObject(By.textContains("Allow access")), 8000))
+        shot("17-link-asks-for-vault")
+        assertTrue(clickText("Choose folder"))
+        SystemClock.sleep(2500); shot("18-folder-picker")
+        // the picker should start in Documents/Uni; navigate there if it didn't
+        if (device.findObject(By.text(java.util.regex.Pattern.compile("(?i)use this folder"))) == null || device.findObject(By.text("Lectures")) == null) {
+            clickText("Documents", timeout = 3000); SystemClock.sleep(1200); clickText("Uni", timeout = 3000); SystemClock.sleep(1200)
+            shot("18b-folder-picker-navigated")
+        }
+        assertTrue("use this folder", clickText("Use this folder", "Select", timeout = 5000))
+        SystemClock.sleep(800); shot("19-allow")
+        assertTrue("allow", clickText("Allow", timeout = 5000))
+        assertNotNull("editor opened", device.wait(Until.findObject(By.desc("Pen")), 15000))
+        SystemClock.sleep(1500)
+        val w = device.displayWidth; val h = device.displayHeight
+        gesture(wave(Rect(0, 0, w, h), h * 0.6f))
+        SystemClock.sleep(500); shot("20-link-editing")
+        device.pressBack()
+        var strokes = 0
+        val t0 = SystemClock.uptimeMillis()
+        while (SystemClock.uptimeMillis() - t0 < 8000) {
+            strokes = runCatching { ExcalidrawScene.parse(sh("cat '$vaultFile'")).elements.count { it.type == "freedraw" && !it.isDeleted } }.getOrDefault(0)
+            if (strokes > 0) break; SystemClock.sleep(300)
+        }
+        log("obsidian link: vault file now has $strokes stroke(s)")
+        assertEquals("stroke saved into the vault file", 1, strokes)
+
+        // second time: permission kept, opens straight away
+        ctx.startActivity(view)
+        assertNotNull("opens directly", device.wait(Until.findObject(By.desc("Pen")), 15000))
+        assertEquals(null, device.findObject(By.textContains("Allow access")))
+        shot("21-link-second-open")
+        device.pressBack()
+    }
+
     /** Overview screenshots of the toolbar and its submenus. */
     @Test fun toolbarAndSubmenus() {
         val s = launch(note(Pages.newPagedScene(PageOrientation.LANDSCAPE, PageDirection.HORIZONTAL).toJson(), "toolbar"))

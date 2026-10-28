@@ -8,6 +8,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- inkcalidraw://open?vault=…&path=…  (the Obsidian plugin's "Edit in Inkcalidraw app") -->
+        <activity android:name=".OpenLinkActivity" android:exported="true" android:excludeFromRecents="true"
+            android:noHistory="false" android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="inkcalidraw" android:host="open" />
+            </intent-filter>
+        </activity>
         <activity android:name=".EditorActivity" android:exported="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|smallestScreenSize|density">
             <!-- "Open with" for a single .excalidraw file (file managers, Obsidian, mail, ...) -->

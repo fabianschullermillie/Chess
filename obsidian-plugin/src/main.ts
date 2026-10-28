@@ -1,14 +1,35 @@
 import { createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { type App, FuzzySuggestModal, loadPdfJs, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TextFileView, TFile, type WorkspaceLeaf } from "obsidian";
+import { type App, FuzzySuggestModal, loadPdfJs, MarkdownView, Platform, Notice, Plugin, PluginSettingTab, Setting, TextFileView, TFile, type WorkspaceLeaf } from "obsidian";
 import { InkScene, parseNote } from "./scene";
 import { decodeMd, encodeMd, isExcalidrawMd, type MdNote } from "./mdformat";
 
 const VIEW_TYPE = "inkcalidraw-view";
 const EXCALIDRAW_PLUGIN = "obsidian-excalidraw-plugin";
 
-interface Settings { claimExtension: boolean; openMarkdownDrawings: boolean }
-const DEFAULTS: Settings = { claimExtension: true, openMarkdownDrawings: true };
+interface Settings { claimExtension: boolean; openMarkdownDrawings: boolean; tapOpensApp: boolean }
+const DEFAULTS: Settings = { claimExtension: true, openMarkdownDrawings: true, tapOpensApp: true };
+
+/** The tablet app only edits plain .excalidraw files (and only exists on Android). */
+const appCanEdit = (f: TFile | null | undefined): f is TFile => !!f && f.extension === "excalidraw";
+
+/** Absolute folder of the vault on this device, when Obsidian tells us (helps the app find the file). */
+function vaultBasePath(app: App): string | null {
+  const ad = app.vault.adapter as unknown as { getBasePath?(): string; basePath?: string; getFullPath?(p: string): string };
+  let base: string | undefined;
+  try { base = ad.getBasePath?.() ?? ad.basePath ?? ad.getFullPath?.(""); } catch { /* not available */ }
+  if (!base) return null;
+  base = base.replace(/^file:\/\//, "");
+  try { base = decodeURIComponent(base); } catch { /* keep */ }
+  return base.startsWith("/") ? base.replace(/\/+$/, "") : null;
+}
+
+export function appLink(app: App, file: TFile): string {
+  const q: [string, string][] = [["vault", app.vault.getName()], ["path", file.path]];
+  const abs = vaultBasePath(app);
+  if (abs) q.push(["abs", abs]);
+  return "inkcalidraw://open?" + q.map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+}
 
 const MIME: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp" };
 
@@ -42,6 +63,26 @@ class InkView extends TextFileView {
   private md: MdNote | null = null;
 
   constructor(leaf: WorkspaceLeaf, private plugin: InkcalidrawPlugin) { super(leaf); }
+
+  async onOpen() {
+    if (Platform.isAndroidApp) {
+      this.addAction("pencil", "Edit in Inkcalidraw app", () => { if (appCanEdit(this.file)) this.plugin.launchApp(this.file); else new Notice("The Inkcalidraw app edits .excalidraw files only"); });
+    }
+    // Coming back from the app: Obsidian may not have noticed the app's save yet, so re-read the file.
+    this.registerDomEvent(document, "visibilitychange", () => {
+      if (document.visibilityState !== "visible") return;
+      for (const ms of [300, 1500, 4000]) window.setTimeout(() => void this.reloadFromDisk(), ms);
+    });
+  }
+
+  private async reloadFromDisk() {
+    const f = this.file;
+    if (!f) return;
+    try {
+      const disk = await this.app.vault.adapter.read(f.path);
+      if (disk && disk !== this.text) this.setViewData(disk, false);
+    } catch { /* file gone */ }
+  }
 
   getViewType() { return VIEW_TYPE; }
   getDisplayText() { return this.file?.basename.replace(/\.excalidraw$/, "") ?? "Inkcalidraw"; }
@@ -158,6 +199,15 @@ class InkView extends TextFileView {
 export default class InkcalidrawPlugin extends Plugin {
   settings: Settings = DEFAULTS;
   skipOnce = new Set<string>();
+  skipApp = new Set<string>();
+  private ready = false;
+
+  /** Opens the drawing in the Inkcalidraw Android app (it edits the vault file in place). */
+  launchApp(file: TFile) {
+    const url = appLink(this.app, file);
+    // Obsidian hands non-web links to Android, which starts the app registered for inkcalidraw://
+    window.open(url);
+  }
   private claimed = false;
 
   private excalidrawPluginOn() {
@@ -178,6 +228,8 @@ export default class InkcalidrawPlugin extends Plugin {
     this.registerView(VIEW_TYPE, (leaf) => new InkView(leaf, this));
     this.claim();
     this.app.workspace.onLayoutReady(() => {
+      // files restored at startup shouldn't launch the app
+      window.setTimeout(() => { this.ready = true; }, 1500);
       this.claim();
       if (!this.claimed && this.settings.claimExtension && this.excalidrawPluginOn()) {
         new Notice("Inkcalidraw: the Excalidraw plugin handles .excalidraw files. Use “Open in Inkcalidraw” from the file menu, or disable the Excalidraw plugin.");
@@ -193,13 +245,17 @@ export default class InkcalidrawPlugin extends Plugin {
       if (file.extension === "excalidraw" && !this.settings.claimExtension) return;
       const leaf = this.app.workspace.getMostRecentLeaf();
       const view = leaf?.view as { file?: TFile } | undefined;
-      if (!leaf || leaf.view.getViewType() === VIEW_TYPE || view?.file?.path !== file.path) return;
+      if (!leaf || view?.file?.path !== file.path) return;
+      // On the tablet, tapping a drawing hands it to the app (the viewer stays open behind it, and refreshes when you come back)
+      if (Platform.isAndroidApp && this.settings.tapOpensApp && appCanEdit(file) && this.ready && !this.skipApp.delete(file.path)) this.launchApp(file);
+      if (leaf.view.getViewType() === VIEW_TYPE) return;
       void leaf.setViewState({ type: VIEW_TYPE, state: { file: file.path }, active: true });
     }));
 
     this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => {
       if (file instanceof TFile && isDrawingFile(file)) {
-        menu.addItem((i) => i.setTitle("Open in Inkcalidraw").setIcon("pen-tool").setSection("open").onClick(() => this.openIn(file)));
+        if (Platform.isAndroidApp && appCanEdit(file)) menu.addItem((i) => i.setTitle("Edit in Inkcalidraw app").setIcon("pencil").setSection("open").onClick(() => this.launchApp(file)));
+        menu.addItem((i) => i.setTitle("Open in Inkcalidraw viewer").setIcon("pen-tool").setSection("open").onClick(() => { this.skipApp.add(file.path); void this.openIn(file); }));
       }
     }));
     this.addCommand({
@@ -209,6 +265,16 @@ export default class InkcalidrawPlugin extends Plugin {
         const f = this.app.workspace.getActiveFile();
         if (!isDrawingFile(f)) return false;
         if (!checking) void this.openIn(f);
+        return true;
+      },
+    });
+    this.addCommand({
+      id: "edit-in-app",
+      name: "Edit current drawing in the Inkcalidraw app",
+      checkCallback: (checking) => {
+        const f = this.app.workspace.getActiveFile();
+        if (!Platform.isAndroidApp || !appCanEdit(f)) return false;
+        if (!checking) this.launchApp(f);
         return true;
       },
     });
@@ -234,13 +300,21 @@ class DrawingPicker extends FuzzySuggestModal<TFile> {
   constructor(private plugin: InkcalidrawPlugin) { super(plugin.app); this.setPlaceholder("Open a drawing in Inkcalidraw"); }
   getItems() { return this.app.vault.getFiles().filter((f) => isDrawingFile(f)).sort((a, b) => b.stat.mtime - a.stat.mtime); }
   getItemText(f: TFile) { return f.path; }
-  onChooseItem(f: TFile) { void this.plugin.openIn(f); }
+  onChooseItem(f: TFile) {
+    if (Platform.isAndroidApp && this.plugin.settings.tapOpensApp && appCanEdit(f)) this.plugin.launchApp(f);
+    this.plugin.skipApp.add(f.path);
+    void this.plugin.openIn(f);
+  }
 }
 
 class InkSettings extends PluginSettingTab {
   constructor(private plugin: InkcalidrawPlugin) { super(plugin.app, plugin); }
   display() {
     this.containerEl.empty();
+    new Setting(this.containerEl)
+      .setName("Tapping a drawing opens the Inkcalidraw app")
+      .setDesc("Android: edit .excalidraw files in the tablet app; they save straight back into the vault. When off, they open in the viewer here (the app is still in the file menu).")
+      .addToggle((t) => t.setValue(this.plugin.settings.tapOpensApp).onChange(async (v) => { this.plugin.settings.tapOpensApp = v; await this.plugin.saveSettings(); }));
     new Setting(this.containerEl)
       .setName("Open .excalidraw files with Inkcalidraw")
       .setDesc("Used whenever the Excalidraw plugin isn't handling them. You can always use “Open in Inkcalidraw”.")

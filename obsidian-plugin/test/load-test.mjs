@@ -57,7 +57,7 @@ const r = await page.evaluate(async ({ code, note, png }) => {
     d.createEl = function (t, o) { const x = document.createElement(t); x.textContent = o?.text ?? ""; this.appendChild(x); return x; }; return d; };
   class Component { registerEvent() {} register() {} }
   class TFile { constructor(path) { this.path = path; this.name = path.split("/").pop(); this.extension = this.name.split(".").pop(); this.basename = this.name.replace(/\.[^.]+$/, ""); this.parent = { path: "/" }; this.stat = { mtime: 1 }; } }
-  const files = { "Drawing 1.excalidraw.md": new TFile("Drawing 1.excalidraw.md"), "Pasted Image 1.png": new TFile("Pasted Image 1.png"), "notes.md": new TFile("notes.md") };
+  const files = { "Lectures/Week 3.excalidraw": new TFile("Lectures/Week 3.excalidraw"), "Drawing 1.excalidraw.md": new TFile("Drawing 1.excalidraw.md"), "Pasted Image 1.png": new TFile("Pasted Image 1.png"), "notes.md": new TFile("notes.md") };
   const disk = { "Drawing 1.excalidraw.md": note };
   const bin = { "Pasted Image 1.png": Uint8Array.from(atob(png), (ch) => ch.charCodeAt(0)).buffer };
   class Plugin extends Component {
@@ -72,15 +72,16 @@ const r = await page.evaluate(async ({ code, note, png }) => {
   class TextFileView extends ItemView { requestSave() { log.saves++; disk[this.file.path] = this.getViewData(); } }
   class Modal { constructor(app) { this.app = app; } open() {} setPlaceholder() {} }
   const obsidian = { Plugin, ItemView, TextFileView, FileView: ItemView, TFile, TFolder: class {}, MarkdownView: class {}, FuzzySuggestModal: Modal,
-    Notice: class { constructor(m) { log.notices.push(m); } }, PluginSettingTab: class { constructor(app) { this.app = app; } }, Setting: class {}, Platform: { isMobile: true },
+    Notice: class { constructor(m) { log.notices.push(m); } }, PluginSettingTab: class { constructor(app) { this.app = app; } }, Setting: class {}, Platform: { isMobile: true, isAndroidApp: true },
     loadPdfJs: async () => ({}) };
   const leaf = { view: { getViewType: () => "markdown", file: files["Drawing 1.excalidraw.md"] }, setViewState: async (s) => { log.viewStates.push(s); } };
+  window.__opened = []; window.open = (u) => { window.__opened.push(u); return null; };
   const app = {
     plugins: { enabledPlugins: new Set(["obsidian-git"]) },
     viewRegistry: { getTypeByExtension: () => undefined },
     workspace: { on: (n, fn) => { (log.handlers[n] ??= []).push(fn); return {}; }, onLayoutReady: (fn) => fn(), getActiveFile: () => files["Drawing 1.excalidraw.md"],
       getLeaf: () => leaf, getMostRecentLeaf: () => leaf, getActiveViewOfType: () => null },
-    vault: { getFiles: () => Object.values(files), getAbstractFileByPath: (p) => files[p.replace(/^\//, "")] ?? null, readBinary: async (f) => bin[f.path],
+    vault: { getName: () => "Uni", adapter: { basePath: "file:///storage/emulated/0/Documents/Uni/", read: async (p) => disk[p] }, getFiles: () => Object.values(files), getAbstractFileByPath: (p) => files[p.replace(/^\//, "")] ?? null, readBinary: async (f) => bin[f.path],
       createBinary: async (p, b) => { files[p] = new TFile(p); bin[p] = b; return files[p]; } },
     metadataCache: { getFileCache: () => null, getFirstLinkpathDest: (p) => files[p] ?? null },
     fileManager: { getAvailablePathForAttachment: async (n) => n },
@@ -94,7 +95,21 @@ const r = await page.evaluate(async ({ code, note, png }) => {
   // file menu: offered for .excalidraw.md and .excalidraw, not for ordinary notes
   const menuFor = (f) => { const items = []; const menu = { addItem: (fn) => { const i = { setTitle: (t) => (items.push(t), i), setIcon: () => i, onClick: () => i, setSection: () => i }; fn(i); return menu; } };
     for (const h of log.handlers["file-menu"]) h(menu, f, "file-explorer-context-menu"); return items; };
-  const menu = { md: menuFor(files["Drawing 1.excalidraw.md"]), plain: menuFor(new TFile("x.excalidraw")), note: menuFor(files["notes.md"]) };
+  const menu = { md: menuFor(files["Drawing 1.excalidraw.md"]), plain: menuFor(files["Lectures/Week 3.excalidraw"]), note: menuFor(files["notes.md"]) };
+  // "Edit in Inkcalidraw app" sends the vault file to the tablet app
+  let edit; { const menu2 = { addItem: (fn) => { const i = { setTitle: (t) => (i.t = t, i), setIcon: () => i, setSection: () => i, onClick: (f) => { if (i.t === "Edit in Inkcalidraw app") edit = f; return i; } }; fn(i); return menu2; } };
+    for (const h of log.handlers["file-menu"]) h(menu2, files["Lectures/Week 3.excalidraw"]); }
+  edit();
+  const menuLink = window.__opened.pop();
+  // tapping a .excalidraw file (after startup) opens the app too; files restored at startup don't
+  const weekLeaf = { view: { getViewType: () => "inkcalidraw-view", file: files["Lectures/Week 3.excalidraw"] }, setViewState: async () => {} };
+  app.workspace.getMostRecentLeaf = () => weekLeaf;
+  for (const h of log.handlers["file-open"]) h(files["Lectures/Week 3.excalidraw"]);
+  const atStartup = window.__opened.length;
+  await new Promise((r) => setTimeout(r, 1700));
+  for (const h of log.handlers["file-open"]) h(files["Lectures/Week 3.excalidraw"]);
+  const tapLink = window.__opened.pop();
+  app.workspace.getMostRecentLeaf = () => leaf;
   const cmd = log.commands["open-current-in-inkcalidraw"].checkCallback(true);
   // opening the drawing (Excalidraw plugin disabled) switches the leaf to our view
   for (const h of log.handlers["file-open"]) h(files["Drawing 1.excalidraw.md"]);
@@ -107,12 +122,17 @@ const r = await page.evaluate(async ({ code, note, png }) => {
   view.contentEl.style.cssText = "position:absolute;inset:0";
   view.setViewData(note, true);
   window.__view = view; window.__disk = disk; window.__log = log;
-  return { extensions: log.extensions, commands: Object.keys(log.commands), ribbon: log.ribbon, notices: log.notices, menu, cmd, viewStates: log.viewStates };
+  return { extensions: log.extensions, commands: Object.keys(log.commands), ribbon: log.ribbon, notices: log.notices, menu, cmd, viewStates: log.viewStates, menuLink, atStartup, tapLink };
 }, { code: dist("main.js"), note, png });
 console.log(JSON.stringify(r));
 assert.ok(r.extensions.includes("excalidraw"), ".excalidraw claimed");
-assert.deepEqual(r.menu.md, ["Open in Inkcalidraw"], "file menu entry for .excalidraw.md");
-assert.deepEqual(r.menu.plain, ["Open in Inkcalidraw"], "file menu entry for .excalidraw");
+assert.deepEqual(r.menu.md, ["Open in Inkcalidraw viewer"], "viewer only for .excalidraw.md (the app edits .excalidraw)");
+assert.deepEqual(r.menu.plain, ["Edit in Inkcalidraw app", "Open in Inkcalidraw viewer"], "file menu entries for .excalidraw");
+const expected = "inkcalidraw://open?vault=Uni&path=Lectures%2FWeek%203.excalidraw&abs=%2Fstorage%2Femulated%2F0%2FDocuments%2FUni";
+assert.equal(r.menuLink, expected, "app link from the file menu");
+assert.equal(r.atStartup, 0, "files restored at startup don't launch the app");
+assert.equal(r.tapLink, expected, "tapping a drawing launches the app");
+console.log("• Android: “Edit in Inkcalidraw app” and tapping a drawing open " + expected);
 assert.deepEqual(r.menu.note, [], "no entry for ordinary notes");
 assert.equal(r.cmd, true, "command available for the open drawing");
 assert.equal(r.viewStates[0]?.type, "inkcalidraw-view", "opening a drawing switches to Inkcalidraw");

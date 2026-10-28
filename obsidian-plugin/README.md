@@ -6,6 +6,12 @@ Opens `.excalidraw` notes from the Inkcalidraw tablet app in Obsidian (desktop a
 - **Editing:** edits are saved back into the same file. The app's own data (pens, page layout, PDF page pointers) is kept. The rendered PDF pages are never written into the note.
 - **Changes from outside:** if the file changes on disk while it's open (e.g. after `git pull`), the view reloads it.
 
+## Editing in the tablet app (Android)
+
+Tapping a `.excalidraw` drawing in Obsidian opens it in the Inkcalidraw app. The app edits the vault file in place, so your changes go straight back into the vault. Press back to return to Obsidian, which then shows the updated drawing. "Edit in Inkcalidraw app" is also in each drawing's file menu and in the viewer's header.
+
+**First time per vault:** the app asks for access to your vault folder. Pick the vault folder (or any folder containing it) and tap "Use this folder", then "Allow". The setting "Tapping a drawing opens the Inkcalidraw app" switches tapping back to the viewer.
+
 ## Install
 
 1. Download `inkcalidraw-obsidian-<version>.zip` from the CI artifacts (or build it, see below).
